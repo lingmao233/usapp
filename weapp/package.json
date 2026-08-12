@@ -1,0 +1,31 @@
+{
+  "name": "us-app-weapp",
+  "private": true,
+  "version": "0.1.0",
+  "description": "「我们」微信小程序端（Taro 4 + React + tailwindcss）",
+  "scripts": {
+    "dev:weapp": "taro build --type weapp --watch",
+    "build:weapp": "taro build --type weapp"
+  },
+  "dependencies": {
+    "@tarojs/components": "^4.2.1",
+    "@tarojs/plugin-framework-react": "^4.2.1",
+    "@tarojs/plugin-platform-weapp": "^4.2.1",
+    "@tarojs/react": "^4.2.1",
+    "@tarojs/runtime": "^4.2.1",
+    "@tarojs/taro": "^4.2.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@tarojs/cli": "^4.2.1",
+    "@tarojs/vite-runner": "^4.2.1",
+    "@types/react": "^18.3.12",
+    "autoprefixer": "^10.4.23",
+    "postcss": "^8.5.6",
+    "sass": "^1.83.0",
+    "tailwindcss": "^3.4.19",
+    "typescript": "~5.9.3",
+    "weapp-tailwindcss": "^3.7.0"
+  }
+}

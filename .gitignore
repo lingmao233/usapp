@@ -1,0 +1,49 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# 环境变量与密钥（安全债修补：.env 本就该 ignore）
+.env
+server/data/vapid.json
+
+# 图片上传目录（随备份脚本打包，不进仓库）
+server/data/uploads/
+
+# 数据库文件（本地运行产物，不进仓库）
+server/data/*.db
+server/data/*.db-shm
+server/data/*.db-wal
+
+# Python 虚拟环境与缓存
+server/.venv/
+server/.venv-mac/
+.pytest_cache/
+__pycache__/
+
+# 历史备份与小程序构建缓存
+node_modules.bak/
+weapp/.swc/
+
+# 其他工具会话产物
+.workbuddy/

@@ -1,0 +1,14 @@
+node_modules
+dist
+server/.venv
+server/data
+server/**/__pycache__
+**/__pycache__
+*.pyc
+.git
+.env
+server/.env
+docs
+deploy
+*.md
+!README.md

@@ -1,0 +1,145 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* 「我们」暖纸感配色 */
+    --us-cream: #F5F0E1;
+    --us-beige: #E8DCC4;
+    --us-teal: #264653;
+    --us-ink: #161616;
+    --us-coral: #F4A261;
+    --us-golden: #E9C46A;
+    --us-mint: #A8DADC;
+
+    --background: 45 50% 92%;
+    --foreground: 0 0% 9%;
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 9%;
+    --popover: 45 50% 96%;
+    --popover-foreground: 0 0% 9%;
+    --primary: 0 0% 9%;
+    --primary-foreground: 45 50% 96%;
+    --secondary: 40 44% 84%;
+    --secondary-foreground: 197 37% 24%;
+    --muted: 40 30% 86%;
+    --muted-foreground: 197 15% 40%;
+    --accent: 27 87% 67%;
+    --accent-foreground: 0 0% 9%;
+    --destructive: 0 70% 50%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 40 25% 78%;
+    --input: 40 25% 70%;
+    --ring: 27 87% 67%;
+    --radius: 0.75rem;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    background-color: var(--us-cream);
+  }
+
+  body {
+    background-color: var(--us-cream);
+    color: var(--us-ink);
+    font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Poppins", sans-serif;
+    font-style: normal;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* 中文禁用 italic */
+  em, i {
+    font-style: normal;
+  }
+}
+
+@layer components {
+  /* 衬线标题 */
+  .us-serif {
+    font-family: "Songti SC", "Noto Serif SC", "STSong", "Literata", serif;
+    color: var(--us-teal);
+    font-style: normal;
+  }
+
+  /* 主按钮：pill 形深色底白字 */
+  .us-btn {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-full px-5 py-2 text-sm font-medium transition-all duration-200 select-none;
+    background-color: var(--us-ink);
+    color: #FFFFFF;
+  }
+  .us-btn:hover:not(:disabled) {
+    background-color: var(--us-teal);
+    transform: translateY(-1px);
+  }
+  .us-btn:active:not(:disabled) {
+    transform: translateY(0);
+  }
+  .us-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .us-btn-ghost {
+    @apply inline-flex items-center justify-center gap-1 rounded-full px-4 py-1.5 text-sm transition-colors duration-200 select-none;
+    color: var(--us-teal);
+    background-color: transparent;
+  }
+  .us-btn-ghost:hover {
+    background-color: rgba(38, 70, 83, 0.08);
+  }
+
+  /* 极简输入框：focus 仅下划线 */
+  .us-input {
+    @apply w-full bg-transparent outline-none text-base placeholder:text-stone-400;
+    border: none;
+    border-bottom: 1.5px solid rgba(38, 70, 83, 0.25);
+    border-radius: 0;
+    padding: 0.5rem 0.125rem;
+    transition: border-color 0.2s ease;
+  }
+  .us-input:focus {
+    border-bottom-color: var(--us-coral);
+  }
+
+  /* 标签小 pill */
+  .us-chip {
+    @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs leading-5;
+    background-color: rgba(233, 196, 106, 0.35);
+    color: var(--us-teal);
+  }
+
+  /* “可能相关”卡片：mint 浅底 */
+  .us-related {
+    background-color: rgba(168, 218, 220, 0.45);
+    border-radius: 0.875rem;
+  }
+
+  /* 分区底 */
+  .us-panel {
+    background-color: var(--us-beige);
+  }
+}
+
+/* 碎片流 stagger 渐入：y 位移 + 透明度，spring 感 */
+@keyframes us-rise {
+  0% {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  60% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.us-rise {
+  animation: us-rise 0.55s cubic-bezier(0.22, 1.4, 0.36, 1) both;
+}

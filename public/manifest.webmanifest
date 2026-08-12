@@ -1,0 +1,36 @@
+{
+  "name": "我们",
+  "short_name": "我们",
+  "description": "和圈子里的伙伴分享碎片，沉淀共同记忆",
+  "start_url": "/wall",
+  "scope": "/",
+  "display": "standalone",
+  "theme_color": "#F5F0E1",
+  "background_color": "#F5F0E1",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-maskable-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
