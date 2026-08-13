@@ -155,6 +155,7 @@ def test_weekly_prompt_contains_persona_and_quotes() -> None:
     assert "- 阿澈：爬山真累" in prompt and "- 丫丫：哈哈哈" in prompt
     assert "不要大段照抄" in prompt
     assert "事实与猜测的分寸" in prompt
+    assert "绝不要写进报告" in prompt  # 分寸是写作纪律，不作为章节渲染（BUG-005）
     assert prompt.index(PERSONAS["sunshi"]) < prompt.index("事实与猜测的分寸")
 
     # 人格缺省回退观察员；语录为空有兜底文案

@@ -96,13 +96,31 @@ def send_plan_chat(wish_id: str, user_id: str, message: str) -> dict:
 
     history = _thread_messages(conn, thread_id)
     # 语录复用周报的公开检索（隐私铁律同源）：只取本周公开碎片/评论原句
-    from . import reports  # 延迟导入：reports 与 chat 无相互依赖，仅此处用到
+    from . import memory, reports  # 延迟导入：reports/memory 与 chat 无相互依赖，仅此处用到
 
     week_start, week_end = reports.current_week_range()
     quotes = reports._collect_quotes(conn, wish["circle_id"], week_start, week_end)
     plan = json.loads(wish["plan"])
     participants = plan.get("participants") or [_nickname(wish["user_id"])]
-    reply = ai.plan_chat(wish["content"], plan, participants, quotes, history, message)
+    # 画像注入（viewer-relative）：自己全量（含隐私来源统计，仅本人可见）+ 其他参与者仅 style
+    profiles = memory.get_profiles(wish["circle_id"])
+    uid_by_nick = {
+        r["nickname"]: r["id"]
+        for r in conn.execute(
+            "SELECT id, nickname FROM users WHERE circle_id = ?", (wish["circle_id"],)
+        )
+    }
+    member_styles = []
+    for name in participants:
+        uid = uid_by_nick.get(name)
+        if uid and uid != user_id:
+            line = ai.format_style_digest(name, profiles.get(uid, {}))
+            if line:
+                member_styles.append(line)
+    reply = ai.plan_chat(
+        wish["content"], plan, participants, quotes, history, message,
+        viewer_profile=profiles.get(user_id), member_styles=member_styles,
+    )
 
     conn.execute(
         "INSERT INTO chat_messages (id, thread_id, role, content, created_at) VALUES (?, ?, 'assistant', ?, ?)",

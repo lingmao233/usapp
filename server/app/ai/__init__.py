@@ -116,22 +116,38 @@ def summarize_text(text: str) -> str:
         return mock.summarize(text)
 
 
+def format_style_digest(nickname: str, profile: dict) -> str:
+    """把画像的 style 维渲染成一行 prompt 摘录；无有效字段时返回空串（调用方过滤）。
+
+    style 只从公开发言蒸馏（memory.refresh_dirty 的公开摘录口径），可进圈级 prompt。
+    """
+    style = (profile or {}).get("style") or {}
+    catch = [str(c) for c in (style.get("catchphrases") or []) if c][:2]
+    values = [f"口头禅「{'」「'.join(catch)}」"] if catch else []
+    values += [str(style.get(k) or "").strip() for k in ("wording", "emoji", "sentence_length")]
+    parts = [v for v in values if v and v != "暂无"]
+    return f"{nickname}：{'，'.join(parts)}" if parts else ""
+
+
 def build_weekly_prompt(
     fragments_repr: str,
     week_start: str,
     week_end: str,
     persona: str = "",
     quotes: list[str] | None = None,
+    styles: list[str] | None = None,
 ) -> str:
-    """周报 prompt 组装（纯函数，便于直接断言人格与语录注入）。
+    """周报 prompt 组装（纯函数，便于直接断言人格、语录与风格注入）。
 
     人格管语气（开头 persona 段），"事实与猜测的分寸"规则管事实（模板内原样保留）。
     """
     quotes_repr = "\n".join(f"- {q}" for q in quotes) if quotes else "（本周还没有可引用的发言）"
+    styles_repr = "\n".join(f"- {s}" for s in styles) if styles else "（暂无成员风格画像）"
     return WEEKLY_REPORT_PROMPT.format(
         persona=persona or PERSONAS[DEFAULT_PERSONA],
         fragments=fragments_repr,
         quotes=quotes_repr,
+        styles=styles_repr,
         week_start=week_start,
         week_end=week_end,
     )
@@ -144,11 +160,12 @@ def generate_weekly_report(
     stats: dict,
     persona: str = "",
     quotes: list[str] | None = None,
+    styles: list[str] | None = None,
 ) -> str:
     if settings.llm_mock:
         return mock.weekly_report(fragments_repr, week_start, week_end, stats)
     try:
-        prompt = build_weekly_prompt(fragments_repr, week_start, week_end, persona, quotes)
+        prompt = build_weekly_prompt(fragments_repr, week_start, week_end, persona, quotes, styles)
         return deepseek.chat(prompt, timeout=120.0)
     except Exception as exc:  # noqa: BLE001
         _state.used_mock = True
@@ -261,6 +278,33 @@ def generate_user_profile(nickname: str, stats: dict, excerpts: list[str] | None
         return mock.user_profile(nickname, stats, excerpts)
 
 
+def build_plan_chat_prompt(
+    wish: str,
+    participants: list[str],
+    plan: dict,
+    quotes: list[str],
+    history: list[dict],
+    message: str,
+    viewer_profile: dict | None = None,
+    member_styles: list[str] | None = None,
+) -> str:
+    """方案追问 prompt 组装（纯函数）：画像注入 viewer-relative——自己全量、他人仅 style。"""
+    history_text = "\n".join(
+        f"{'用户' if h.get('role') == 'user' else '助手'}：{h.get('content', '')}"
+        for h in history[-10:]
+    ) or "（还没有对话）"
+    return PLAN_CHAT_PROMPT.format(
+        wish=wish,
+        participants="、".join(participants),
+        plan=json.dumps(plan, ensure_ascii=False),
+        quotes="\n".join(f"- {q}" for q in quotes) or "（暂无语录）",
+        viewer_profile=json.dumps(viewer_profile, ensure_ascii=False) if viewer_profile else "（暂无画像）",
+        member_styles="\n".join(f"- {s}" for s in member_styles) if member_styles else "（暂无）",
+        history=history_text,
+        message=message,
+    )
+
+
 def plan_chat(
     wish: str,
     plan: dict,
@@ -268,22 +312,15 @@ def plan_chat(
     quotes: list[str],
     history: list[dict],
     message: str,
+    viewer_profile: dict | None = None,
+    member_styles: list[str] | None = None,
 ) -> str:
-    """方案追问：上下文 = 愿望 + 已定方案 + 圈内公开语录 + 近 10 条对话。失败回退 mock。"""
+    """方案追问：上下文 = 愿望 + 已定方案 + 圈内公开语录 + 画像（viewer-relative）+ 近 10 条对话。"""
     if settings.llm_mock:
         return mock.plan_chat(wish, message)
     try:
-        history_text = "\n".join(
-            f"{'用户' if h.get('role') == 'user' else '助手'}：{h.get('content', '')}"
-            for h in history[-10:]
-        ) or "（还没有对话）"
-        prompt = PLAN_CHAT_PROMPT.format(
-            wish=wish,
-            participants="、".join(participants),
-            plan=json.dumps(plan, ensure_ascii=False),
-            quotes="\n".join(f"- {q}" for q in quotes) or "（暂无语录）",
-            history=history_text,
-            message=message,
+        prompt = build_plan_chat_prompt(
+            wish, participants, plan, quotes, history, message, viewer_profile, member_styles
         )
         return deepseek.chat(prompt).strip()
     except Exception as exc:  # noqa: BLE001

@@ -186,9 +186,23 @@ def _collect_week_data(circle_id: str, week_start: str, week_end: str) -> dict:
 
     fragments_repr = "\n".join(_fragment_line(f) for f in fragments) or "（本周还没有碎片）"
 
+    # 成员说话风格：style 维来自公开发言蒸馏（memory.refresh_dirty 的公开摘录口径），
+    # 进圈级 prompt 天然合规；topics 等统计维含隐私来源，不进周报
+    profiles = memory.get_profiles(circle_id)
+    nicknames = {
+        r["id"]: r["nickname"]
+        for r in conn.execute("SELECT id, nickname FROM users WHERE circle_id = ?", (circle_id,))
+    }
+    styles = [
+        line
+        for uid, p in profiles.items()
+        if (line := ai.format_style_digest(nicknames.get(uid, ""), p))
+    ]
+
     return {
         "fragments_repr": fragments_repr,
         "quotes": _collect_quotes(conn, circle_id, week_start, week_end),
+        "styles": styles,
         "stats": {
             "users": users,
             "top_tags": top_tags,
@@ -224,7 +238,7 @@ def generate_report(
         data = _collect_week_data(circle_id, week_start, week_end)
         content = ai.generate_weekly_report(
             data["fragments_repr"], week_start, week_end, data["stats"],
-            persona=_circle_persona(conn, circle_id), quotes=data["quotes"],
+            persona=_circle_persona(conn, circle_id), quotes=data["quotes"], styles=data["styles"],
         )
         report_id = uuid.uuid4().hex[:12]
         if existing:

@@ -347,6 +347,23 @@ def refresh_dirty(circle_id: str) -> dict:
     return result
 
 
+# ---------- 画像读取（消费侧） ----------
+
+def get_profiles(circle_id: str) -> dict[str, dict]:
+    """读本圈已蒸馏的成员画像（user_id → profile dict）；没跑过蒸馏的成员缺席。
+
+    消费侧注意 viewer-relative：style 维来自公开发言，可进圈级 prompt；
+    topics/summary 等统计维含隐私来源，只能给本人视角用。
+    """
+    conn = get_conn()
+    return {
+        r["user_id"]: json.loads(r["profile"] or "{}")
+        for r in conn.execute(
+            "SELECT user_id, profile FROM user_profiles WHERE circle_id = ?", (circle_id,)
+        ).fetchall()
+    }
+
+
 # ---------- 关系图（观看者视角，§5/§6） ----------
 
 def _private_source(tag_sets: dict, uid: str, tag: str) -> bool:
