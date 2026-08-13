@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react"
 import { api, type CommonWish, type Session, type Wish, type WishPlan } from "@/lib/api"
 import ImagePicker, { type PickedImage } from "@/components/ImagePicker"
 import FragImage from "@/components/FragImage"
+import PlanChat from "@/components/PlanChat"
 
 const CATEGORY_LABEL: Record<string, string> = {
   eat: "想吃",
@@ -30,6 +31,24 @@ function PlanCard({ plan, participants }: { plan: WishPlan; participants?: strin
           </li>
         ))}
       </ol>
+      {plan.links && plan.links.length > 0 && (
+        <div className="mt-2.5 flex flex-wrap gap-2">
+          {plan.links.map((l, i) => (
+            <a
+              key={i}
+              href={l.url}
+              target="_blank"
+              rel="noreferrer"
+              className="text-xs text-[#264653] underline underline-offset-2 hover:opacity-70"
+            >
+              🔗 {l.label}
+            </a>
+          ))}
+        </div>
+      )}
+      {plan.disclaimer && (
+        <p className="mt-2 text-xs text-stone-400">{plan.disclaimer}</p>
+      )}
     </div>
   )
 }
@@ -44,21 +63,28 @@ export default function Wishes({ session }: { session: Session }) {
   const [visibility, setVisibility] = useState<"public" | "private">("public")
   const [image, setImage] = useState<PickedImage | null>(null)
   const [submitError, setSubmitError] = useState("")
+  const [loaded, setLoaded] = useState(false)
+  // 已完成愿望区块：默认折叠
+  const [showDone, setShowDone] = useState(false)
 
   const load = useCallback(async () => {
+    // 两个请求独立成败：共同愿望匹配重、偶发失败，不拖垮愿望列表的展示
     try {
-      const [w, c] = await Promise.all([
-        api.listWishes(session.circle_id, session.user_id),
-        api.commonWishes(session.circle_id),
-      ])
+      const w = await api.listWishes(session.circle_id, session.user_id)
       setWishes(w.wishes)
-      setCommon(c.common_wishes)
       // 已缓存的方案直接展示
       const cached: Record<string, { plan: WishPlan }> = {}
       w.wishes.forEach((wish) => {
         if (wish.plan) cached[wish.id] = { plan: wish.plan }
       })
       setPlans((prev) => ({ ...cached, ...prev }))
+    } catch {
+      /* 静默，保持现状 */
+    }
+    setLoaded(true)
+    try {
+      const c = await api.commonWishes(session.circle_id)
+      setCommon(c.common_wishes)
     } catch {
       /* 静默 */
     }
@@ -96,8 +122,28 @@ export default function Wishes({ session }: { session: Session }) {
     if (!id) return
     setPlanningId(id)
     try {
-      const res = await api.wishPlan(id)
-      setPlans((prev) => ({ ...prev, [id]: { plan: res.plan, participants: res.participants } }))
+      const res = await api.wishPlan(id, session.user_id)
+      if (res.status === "generating") {
+        // 后台生成中：轮询愿望列表，方案落库即展示（另有 Web Push 通知兜底）
+        const deadline = Date.now() + 90_000
+        while (Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 3000))
+          try {
+            const w = await api.listWishes(session.circle_id, session.user_id)
+            const wish = w.wishes.find((x) => x.id === id)
+            if (wish?.plan) {
+              setPlans((prev) => ({ ...prev, [id]: { plan: wish.plan as WishPlan } }))
+              return
+            }
+          } catch {
+            /* 轮询单次失败继续等 */
+          }
+        }
+        return // 超时放弃：推送通知会在生成完成后引导回来查看
+      }
+      if (res.plan) {
+        setPlans((prev) => ({ ...prev, [id]: { plan: res.plan, participants: res.participants } }))
+      }
     } finally {
       setPlanningId(null)
     }
@@ -113,7 +159,22 @@ export default function Wishes({ session }: { session: Session }) {
     }
   }
 
+  // 勾选完成/取消：本地即时更新（服务端已校验作者本人），完成即移出共同愿望匹配池
+  async function handleToggleDone(w: Wish) {
+    const done = w.status !== "done"
+    try {
+      await api.toggleWishDone(w.id, session.user_id, done)
+      setWishes((ws) => ws.map((x) => (x.id === w.id ? { ...x, status: done ? "done" : "active" } : x)))
+      // 匹配池变了，共同愿望重拉一次
+      api.commonWishes(session.circle_id).then((c) => setCommon(c.common_wishes)).catch(() => {})
+    } catch {
+      /* 失败保持现状，用户可重试 */
+    }
+  }
+
   const myWishes = wishes.filter((w) => w.user_id === session.user_id)
+  const myActive = myWishes.filter((w) => w.status !== "done")
+  const myDone = myWishes.filter((w) => w.status === "done")
   const others = wishes.filter((w) => w.user_id !== session.user_id)
 
   return (
@@ -163,7 +224,9 @@ export default function Wishes({ session }: { session: Session }) {
         <h3 className="us-serif text-lg mb-3">我们的共同愿望</h3>
         {common.length === 0 ? (
           <p className="text-sm text-stone-400 leading-relaxed">
-            还没有撞在一起的愿望。等你们各自多丢几条，AI 会发现"原来你也想"。
+            {loaded
+              ? "还没有撞在一起的愿望。等你们各自多丢几条，AI 会发现“原来你也想”。"
+              : "加载中…"}
           </p>
         ) : (
           <div className="flex flex-col gap-4">
@@ -181,7 +244,10 @@ export default function Wishes({ session }: { session: Session }) {
                   <p className="text-base font-medium leading-relaxed">{c.content}</p>
                   <p className="text-sm text-stone-500 mt-2 leading-relaxed">{c.suggestion}</p>
                   {planEntry ? (
-                    <PlanCard plan={planEntry.plan} participants={planEntry.participants} />
+                    <>
+                      <PlanCard plan={planEntry.plan} participants={planEntry.participants} />
+                      {c.wish_ids[0] && <PlanChat wishId={c.wish_ids[0]} session={session} />}
+                    </>
                   ) : (
                     <button
                       className="us-btn-ghost border border-[#264653]/15 text-xs mt-3"
@@ -198,19 +264,28 @@ export default function Wishes({ session }: { session: Session }) {
         )}
       </section>
 
-      {/* 我的愿望 */}
+      {/* 我的愿望（未完成） */}
       <section className="mb-8">
         <h3 className="us-serif text-lg mb-3">我的愿望</h3>
-        {myWishes.length === 0 ? (
-          <p className="text-sm text-stone-400">还没有，写一个呗</p>
+        {myActive.length === 0 ? (
+          <p className="text-sm text-stone-400">
+            {loaded ? (myDone.length > 0 ? "都完成啦，再加一个？" : "还没有，写一个呗") : "加载中…"}
+          </p>
         ) : (
           <div className="flex flex-col">
-            {myWishes.map((w, i) => (
+            {myActive.map((w, i) => (
               <div
                 key={w.id}
                 className="us-rise py-3 border-b border-[#264653]/10 flex items-center gap-3"
                 style={{ animationDelay: `${i * 60}ms` }}
               >
+                {/* 勾选完成：移出共同愿望匹配池，进下方"已完成" */}
+                <button
+                  className="shrink-0 h-5 w-5 rounded-full border border-[#264653]/30 hover:bg-[#264653]/10 transition-colors"
+                  title="标记为已完成"
+                  onClick={() => handleToggleDone(w)}
+                  aria-label="标记为已完成"
+                />
                 <span className="us-chip shrink-0">{CATEGORY_LABEL[w.category] ?? "想做"}</span>
                 {w.image_url && (
                   <FragImage
@@ -238,6 +313,48 @@ export default function Wishes({ session }: { session: Session }) {
           </div>
         )}
       </section>
+
+      {/* 已完成愿望：独立区块，默认折叠；取消勾选回到未完成区和匹配池 */}
+      {myDone.length > 0 && (
+        <section className="mb-8">
+          <button
+            className="us-serif text-lg mb-3 flex items-center gap-2 text-stone-500 hover:text-[#264653] transition-colors"
+            onClick={() => setShowDone((v) => !v)}
+          >
+            已完成愿望
+            <span className="text-xs font-normal">
+              {myDone.length} 条 {showDone ? "▲ 收起" : "▼ 展开"}
+            </span>
+          </button>
+          {showDone && (
+            <div className="flex flex-col">
+              {myDone.map((w) => (
+                <div
+                  key={w.id}
+                  className="py-3 border-b border-[#264653]/10 flex items-center gap-3 opacity-60"
+                >
+                  <button
+                    className="shrink-0 h-5 w-5 rounded-full bg-[#264653] text-white text-xs flex items-center justify-center"
+                    title="取消完成，回到愿望列表"
+                    onClick={() => handleToggleDone(w)}
+                    aria-label="取消完成"
+                  >
+                    ✓
+                  </button>
+                  <span className="text-sm leading-relaxed line-through">{w.content}</span>
+                  <button
+                    className="ml-auto text-stone-300 hover:text-stone-500 text-sm leading-none shrink-0"
+                    onClick={() => handleDeleteWish(w)}
+                    aria-label="删除愿望"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
 
       {/* 朋友们的愿望 */}
       {others.length > 0 && (

@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException
 
 from . import ai
-from .api import accounts, circles, fragments, knowledge, push, reports, uploads, wishes
+from .api import accounts, chat, circles, fragments, knowledge, push, reports, uploads, wishes
 from .db.database import init_db
 
 logging.basicConfig(
@@ -37,6 +37,7 @@ app.include_router(wishes.router)
 app.include_router(reports.router)
 app.include_router(push.router)
 app.include_router(uploads.router)
+app.include_router(chat.router)
 
 
 @app.on_event("startup")

@@ -171,6 +171,34 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
     keys_json TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+
+-- 共同愿望匹配结果缓存：圈级一行，匹配池指纹变化才重算（不每个写路径手动失效）
+CREATE TABLE IF NOT EXISTS common_wishes_cache (
+    circle_id TEXT PRIMARY KEY REFERENCES circles(id),
+    fingerprint TEXT NOT NULL,
+    result TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- 会话（方案追问）：通用设计——kind + ref_id 标记关联对象（plan → wish_id），
+-- 未来独立 AI 聊天页直接复用这两张表（kind='free' 之类）
+CREATE TABLE IF NOT EXISTS chat_threads (
+    id TEXT PRIMARY KEY,
+    circle_id TEXT NOT NULL REFERENCES circles(id),
+    user_id TEXT NOT NULL REFERENCES users(id),
+    kind TEXT NOT NULL DEFAULT 'plan',
+    ref_id TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    UNIQUE(user_id, kind, ref_id)
+);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id TEXT PRIMARY KEY,
+    thread_id TEXT NOT NULL REFERENCES chat_threads(id),
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 
@@ -183,6 +211,9 @@ def get_conn() -> sqlite3.Connection:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
+        # WAL 下读不阻塞写，但写与写仍串行：把等锁上限从默认 5s 提到 30s，
+        # 避免蒸馏/周报等长任务期间并发写直接报 database is locked
+        conn.execute("PRAGMA busy_timeout=30000")
         _local.conn = conn
     return conn
 
@@ -196,6 +227,7 @@ def init_db() -> None:
     _migrate_image_url()
     _migrate_fragments_caption()
     _migrate_circles_persona()
+    _migrate_wishes_matched_status()
     get_conn().commit()
 
 
@@ -303,10 +335,16 @@ def _migrate_circles_persona() -> None:
         )
 
 
+def _migrate_wishes_matched_status() -> None:
+    """数据迁移：matched 语义下线（生成方案不再改状态，完成与否只由用户勾选决定），
+    存量 matched 愿望迁回 active 重新进入共同愿望匹配池。幂等，每次启动跑无负担。"""
+    get_conn().execute("UPDATE wishes SET status='active' WHERE status='matched'")
+
+
 def reset_db() -> None:
     """仅测试用：清空全部数据。"""
     conn = get_conn()
-    for table in ("pair_relationships", "user_profiles", "task_runs", "reports", "wishes", "comments", "likes", "push_subscriptions", "knowledge_items", "fragments", "memberships", "users", "circles", "accounts"):
+    for table in ("chat_messages", "chat_threads", "common_wishes_cache", "pair_relationships", "user_profiles", "task_runs", "reports", "wishes", "comments", "likes", "push_subscriptions", "knowledge_items", "fragments", "memberships", "users", "circles", "accounts"):
         conn.execute(f"DELETE FROM {table}")
     conn.commit()
 
@@ -324,6 +362,10 @@ def decode_embedding(blob: bytes | None) -> np.ndarray | None:
 
 
 def cosine(a: np.ndarray, b: np.ndarray) -> float:
+    # 维度不一致（换过 embedding 维度/端点的存量数据）视为不相似，不抛异常拖垮整批计算；
+    # 想恢复真实相似度，跑 scripts/reembed.py 回填统一维度
+    if a.shape != b.shape:
+        return 0.0
     na = np.linalg.norm(a)
     nb = np.linalg.norm(b)
     if na == 0 or nb == 0:

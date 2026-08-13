@@ -127,11 +127,14 @@ def run_all(client: TestClient) -> None:
     # 7. 行动方案生成 + 缓存
     wish_id = wishes[0]["id"]
     r = client.post(f"/api/wishes/{wish_id}/plan")
-    plan = r.json()
-    check("生成「一起去」行动方案", "plan" in plan and len(plan["plan"].get("steps", [])) >= 1,
-          f"方案时间 {plan['plan'].get('time')}")
+    # 接口已改异步：未缓存返回 generating；TestClient 内联跑完后台任务后方案即落库
+    check("生成「一起去」行动方案（异步受理）",
+          r.json().get("status") == "generating" or "plan" in r.json())
     r2 = client.post(f"/api/wishes/{wish_id}/plan")
-    check("方案缓存在 wishes.plan（第二次命中缓存）", r2.json().get("cached") is True)
+    plan = r2.json()
+    check("方案缓存在 wishes.plan（第二次命中缓存）",
+          plan.get("cached") is True and len(plan["plan"].get("steps", [])) >= 1,
+          f"方案时间 {plan['plan'].get('time')}")
 
     # 8. 手动添加愿望
     r = client.post("/api/wishes", json={"circle_id": cid, "user_id": u2["user_id"], "content": "想吃一顿深夜火锅"})

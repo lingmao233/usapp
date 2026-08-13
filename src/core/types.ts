@@ -90,6 +90,20 @@ export interface WishPlan {
   location: string
   budget: string
   steps: string[]
+  /** 查实时价/地图跳转链接（高德/携程搜索） */
+  links?: { label: string; url: string }[]
+  /** 数据说明：哪些是真实查询、哪些是预估 */
+  disclaimer?: string
+  /** 参与人（生成时随方案一起落库，缓存命中也能拿到） */
+  participants?: string[]
+}
+
+/** 方案追问消息（kind='plan' 线程） */
+export interface ChatMessage {
+  id: string
+  role: "user" | "assistant"
+  content: string
+  created_at: string
 }
 
 export interface CommonWish {

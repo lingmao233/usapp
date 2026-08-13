@@ -1,5 +1,7 @@
 """愿望：自动识别 + 手动添加 + 共同愿望匹配 + 行动方案。"""
+import hashlib
 import json
+import logging
 import uuid
 from datetime import datetime
 from itertools import combinations
@@ -7,8 +9,11 @@ from itertools import combinations
 from fastapi import HTTPException
 
 from .. import ai
+from ..config import settings
 from ..db.database import cosine, decode_embedding, encode_embedding, get_conn
-from . import tasks
+from . import amap, tasks
+
+logger = logging.getLogger("us.wishes")
 
 COMMON_THRESHOLD = 0.7
 
@@ -32,6 +37,8 @@ def add_wish(
     visibility: str = "public",
     image_url: str | None = None,
 ) -> dict:
+    """手动加愿望：校验后立刻入库返回（分类默认"想做"、向量留空）；
+    AI 分类与向量化由 process_wish 后台完成（与碎片管线同模式，提交秒回）。"""
     if visibility not in ("public", "private"):
         raise HTTPException(status_code=400, detail="visibility 只能是 public 或 private")
     content = content.strip()
@@ -47,30 +54,41 @@ def add_wish(
     ).fetchone()
     if user is None:
         raise HTTPException(status_code=403, detail="你不是这个圈子的成员")
-    # 纯图片愿望：分类/embedding 的文本输入用占位词，库里存原始 content（可空）
-    ai_text = content or "[图片]"
-    classification = ai.classify_fragment(ai_text)
-    vec = ai.embed_text(ai_text)
     wish_id = uuid.uuid4().hex[:12]
     conn.execute(
         """INSERT INTO wishes
            (id, user_id, circle_id, content, category, fragment_id, status,
             matched_users, embedding, plan, created_at, visibility, image_url)
-           VALUES (?, ?, ?, ?, ?, '', 'active', '[]', ?, NULL, ?, ?, ?)""",
-        (
-            wish_id,
-            user_id,
-            circle_id,
-            content,
-            classification["wish_category"] or "do",
-            encode_embedding(vec),
-            _now(),
-            visibility,
-            image_url or None,
-        ),
+           VALUES (?, ?, ?, ?, 'do', '', 'active', '[]', NULL, NULL, ?, ?, ?)""",
+        (wish_id, user_id, circle_id, content, _now(), visibility, image_url or None),
     )
     conn.commit()
     return {"id": wish_id, "status": "created"}
+
+
+def process_wish(wish_id: str) -> None:
+    """手动愿望的异步处理：AI 分类（想吃/想去…）+ 文本向量。
+
+    向量就绪前该愿望不参与共同愿望匹配与"一起去"参与人计算（NULL 天然跳过）；
+    经任务层：失败重试 + degraded 落库，重试对已处理行幂等跳过。
+    """
+
+    def _job() -> None:
+        conn = get_conn()
+        row = conn.execute("SELECT * FROM wishes WHERE id = ?", (wish_id,)).fetchone()
+        if row is None or row["embedding"] is not None:
+            return
+        # 纯图片愿望：分类/embedding 的文本输入用占位词，库里存原始 content（可空）
+        ai_text = row["content"] or "[图片]"
+        classification = ai.classify_fragment(ai_text)
+        vec = ai.embed_text(ai_text)
+        conn.execute(
+            "UPDATE wishes SET category=?, embedding=? WHERE id=?",
+            (classification["wish_category"] or "do", encode_embedding(vec), wish_id),
+        )
+        conn.commit()
+
+    tasks.run_task("wish_pipeline", wish_id, _job)
 
 
 def list_wishes(circle_id: str, user_id: str | None = None, status: str | None = None) -> dict:
@@ -102,8 +120,36 @@ def delete_wish(wish_id: str, user_id: str) -> dict:
     return {"id": wish_id, "status": "deleted", "circle_id": row["circle_id"]}
 
 
+def set_wish_done(wish_id: str, user_id: str, done: bool) -> dict:
+    """勾选完成/取消完成（仅作者本人）：完成的愿望移出共同愿望匹配池（status='done'），
+    取消勾选回到 active 重新参与匹配。与方案是否生成无关。"""
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM wishes WHERE id = ?", (wish_id,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="愿望不存在")
+    if row["user_id"] != user_id:
+        raise HTTPException(status_code=403, detail="只能操作自己的愿望")
+    status = "done" if done else "active"
+    conn.execute("UPDATE wishes SET status = ? WHERE id = ?", (status, wish_id))
+    conn.commit()
+    return {"id": wish_id, "status": status, "circle_id": row["circle_id"]}
+
+
 def common_wishes(circle_id: str) -> dict:
-    """共同愿望匹配（经任务层：失败重试 + 状态落 task_runs）。"""
+    """共同愿望匹配（圈级缓存）：匹配池指纹一致直接返回缓存，变化才经任务层重算。
+
+    指纹 = 圈内全部愿望的 id/状态/向量就绪标记的哈希——增删愿望、勾选完成、
+    向量就绪都会改变指纹，缓存因此自失效，无需在写路径手动清。
+    """
+    conn = get_conn()
+    fp = _pool_fingerprint(conn, circle_id)
+    cached = conn.execute(
+        "SELECT result FROM common_wishes_cache WHERE circle_id = ? AND fingerprint = ?",
+        (circle_id, fp),
+    ).fetchone()
+    if cached:
+        return {"common_wishes": json.loads(cached["result"])}
+
     results: list[dict] = []
 
     def _job() -> None:
@@ -112,7 +158,28 @@ def common_wishes(circle_id: str) -> dict:
 
     if tasks.run_task("common_wishes", circle_id, _job) == "failed":
         raise HTTPException(status_code=500, detail="共同愿望匹配失败，请稍后重试")
+    conn.execute(
+        """INSERT INTO common_wishes_cache (circle_id, fingerprint, result, updated_at)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(circle_id) DO UPDATE SET fingerprint=excluded.fingerprint,
+               result=excluded.result, updated_at=excluded.updated_at""",
+        (circle_id, fp, json.dumps(results, ensure_ascii=False), _now()),
+    )
+    conn.commit()
     return {"common_wishes": results}
+
+
+def _pool_fingerprint(conn, circle_id: str) -> str:
+    """匹配池指纹：愿望集合（id + status + 向量是否就绪）的哈希。"""
+    rows = conn.execute(
+        "SELECT id, status, embedding IS NOT NULL AS has_vec FROM wishes"
+        " WHERE circle_id = ? ORDER BY id",
+        (circle_id,),
+    ).fetchall()
+    h = hashlib.md5()
+    for r in rows:
+        h.update(f"{r['id']}:{r['status']}:{r['has_vec']};".encode())
+    return h.hexdigest()
 
 
 def compute_common_wishes(circle_id: str, include_private: bool = False) -> list[dict]:
@@ -216,6 +283,29 @@ def compute_common_wishes(circle_id: str, include_private: bool = False) -> list
     return results
 
 
+def get_cached_plan(wish_id: str) -> dict | None:
+    """已缓存的方案直接返回；未生成返回 None（调用方转异步生成）。"""
+    row = get_conn().execute(
+        "SELECT plan FROM wishes WHERE id = ?", (wish_id,)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="愿望不存在")
+    if not row["plan"]:
+        return None
+    return {"plan": json.loads(row["plan"]), "cached": True}
+
+
+def generate_plan_and_notify(wish_id: str, user_id: str | None) -> None:
+    """后台生成方案（经任务层），完成后 Web Push 通知点击者。"""
+    from . import push  # 延迟导入：push 与 wishes 无相互依赖，仅此处用到
+
+    def _job() -> None:
+        generate_plan(wish_id)
+
+    if tasks.run_task("wish_plan", wish_id, _job) != "failed" and user_id:
+        push.notify_plan_ready(wish_id, user_id)
+
+
 def generate_plan(wish_id: str) -> dict:
     """生成"一起去"行动方案，缓存在 wishes.plan。"""
     conn = get_conn()
@@ -247,10 +337,24 @@ def generate_plan(wish_id: str) -> dict:
                 participants.append(other["user_nickname"])
     participants = sorted(set(participants))
 
-    plan = ai.generate_plan(row["content"], participants)
+    plan = ai.generate_plan(row["content"], participants, real_data=_real_plan_context(row["content"]))
+    # 只缓存方案，不改状态：愿望是否完成只由用户勾选决定（matched 语义已下线）。
+    # participants 一并落库：缓存命中/方案追问时仍拿得到参与人
     conn.execute(
-        "UPDATE wishes SET plan = ?, status = 'matched' WHERE id = ?",
-        (json.dumps(plan, ensure_ascii=False), wish_id),
+        "UPDATE wishes SET plan = ? WHERE id = ?",
+        (json.dumps({**plan, "participants": participants}, ensure_ascii=False), wish_id),
     )
     conn.commit()
     return {"plan": plan, "participants": participants, "cached": False}
+
+
+def _real_plan_context(content: str) -> dict | None:
+    """方案真实数据（高德）：未配 AMAP_KEY 或查询失败返回 None，prompt 走纯经验模式。"""
+    if not settings.AMAP_KEY:
+        return None
+    try:
+        q = ai.extract_plan_query(content)
+        return amap.gather(q["city"], q["keywords"])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("高德真实数据查询失败，回退纯经验方案：%s", exc)
+        return None

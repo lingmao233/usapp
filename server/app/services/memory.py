@@ -241,9 +241,12 @@ def refresh_dirty(circle_id: str) -> dict:
     """重算本圈 dirty 的画像与用户对：分量落库 + LLM 生成/更新画像与关系摘要，然后清 dirty。
 
     周报生成前的强制补跑也复用本函数。14 人圈全量上限 14 画像 + 91 对，实际只处理 dirty。
+    每行更新后立即提交：写事务不跨 LLM 调用（否则写锁按分钟持有，并发写 5s 超时报
+    database is locked）；每行自带 dirty=0，逐行提交天然幂等可续跑。
     """
     conn = get_conn()
     _ensure_rows(conn, circle_id)
+    conn.commit()
 
     nicknames = {
         r["id"]: r["nickname"]
@@ -295,6 +298,7 @@ def refresh_dirty(circle_id: str) -> dict:
                 circle_id, a, b,
             ),
         )
+        conn.commit()
 
     dirty_users = conn.execute(
         "SELECT * FROM user_profiles WHERE circle_id = ? AND dirty = 1", (circle_id,)
@@ -336,8 +340,8 @@ def refresh_dirty(circle_id: str) -> dict:
             " WHERE circle_id=? AND user_id=?",
             (json.dumps(profile, ensure_ascii=False), now, circle_id, uid),
         )
+        conn.commit()
 
-    conn.commit()
     result = {"pairs": len(dirty_pairs), "profiles": len(dirty_users)}
     logger.info("圈子 %s 蒸馏完成：%s", circle_id, result)
     return result

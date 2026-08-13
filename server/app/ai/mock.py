@@ -164,17 +164,24 @@ def wish_suggestion(content: str, users: list[str]) -> str:
     return f"{names}可以这周末先约个时间碰头，把「{content}」具体聊一聊，定个小目标就开始。"
 
 
+def extract_plan_query(content: str) -> dict:
+    """确定性目的地提取桩：city 永远为空（桩不懂地理），keywords 用原文截断。"""
+    return {"city": "", "keywords": content[:10] or "周边游"}
+
+
 def generate_plan(content: str, users: list[str]) -> dict:
     names = "、".join(users)
     return {
         "time": "本周六下午 14:00",
         "location": "大家中间点的咖啡馆碰头，再一起出发",
-        "budget": "人均 100 元以内",
+        "budget": "人均 100 元以内（预估）",
         "steps": [
             f"{names}在群里确认时间，先到先得",
             f"围绕「{content}」各自搜一个备选方案，周四前丢进圈子",
             "周六碰头投票，当场定下来就出发",
         ],
+        "links": [],
+        "disclaimer": "mock 模式演示方案，地点为经验推荐，价格均为预估",
     }
 
 
@@ -199,6 +206,11 @@ def user_profile(nickname: str, stats: dict, excerpts: list[str] | None = None) 
                    f"共丢了 {stats.get('fragment_count', 0)} 条碎片。",
         "style": style,
     }
+
+
+def plan_chat(wish: str, message: str) -> str:
+    """确定性追问回复桩：内容可断言，不依赖外部状态。"""
+    return f"（mock 助手）关于「{wish[:10]}」，你问的“{message[:20]}”：建议按方案第一步先走起，细节等接入真实 AI 再细聊。"
 
 
 def pair_summary(name_a: str, name_b: str, topics: list[str], wish_count: int) -> str:

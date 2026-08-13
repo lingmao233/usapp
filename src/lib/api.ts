@@ -70,6 +70,7 @@ export const clearAccountId = () => coreClearAccountId(webStorage)
 export type {
   AccountCircle,
   AccountCirclesResp,
+  ChatMessage,
   Circle,
   Comment,
   CommonWish,

@@ -12,6 +12,8 @@ from .prompts import (
     FRAGMENT_CLASSIFY_PROMPT,
     PAIR_SUMMARY_PROMPT,
     PERSONAS,
+    PLAN_CHAT_PROMPT,
+    PLAN_EXTRACT_PROMPT,
     PLAN_PROMPT,
     SUMMARY_PROMPT,
     USER_PROFILE_PROMPT,
@@ -171,17 +173,69 @@ def wish_suggestion(content: str, users: list[str]) -> str:
     return mock.wish_suggestion(content, users)
 
 
-def generate_plan(content: str, users: list[str]) -> dict:
+def extract_plan_query(content: str) -> dict:
+    """从愿望文本提取目的地（city/keywords），供高德真实数据查询；失败回退原文当关键词。"""
+    if settings.llm_mock:
+        return mock.extract_plan_query(content)
+    try:
+        result = deepseek.chat_json(PLAN_EXTRACT_PROMPT.format(wish=content))
+        return {
+            "city": str(result.get("city", "")).strip(),
+            "keywords": (str(result.get("keywords", "")).strip() or content)[:20],
+        }
+    except Exception as exc:  # noqa: BLE001
+        _state.used_mock = True
+        logger.warning("DeepSeek 目的地提取失败，回退原文关键词：%s", exc)
+        return mock.extract_plan_query(content)
+
+
+def _format_real_data(real_data: dict | None) -> str:
+    """把高德查询结果排版成 prompt 里的「真实数据」段；空段略去，整体为空给兜底文案。"""
+    if not real_data:
+        return "（本次没有可调用的真实数据，按规则 5 处理）"
+    lines: list[str] = []
+    spots = real_data.get("spots") or []
+    if spots:
+        lines.append("候选地点（高德真实 POI）：")
+        lines += [
+            f"- {s['name']}（{s['address'] or '地址见地图'}，评分 {s['rating'] or '暂无'}）"
+            for s in spots
+        ]
+    hotels = real_data.get("hotels") or []
+    if hotels:
+        lines.append("候选酒店（高德真实 POI）：")
+        lines += [
+            f"- {h['name']}（{h['address'] or '地址见地图'}，参考价 {h['cost'] or '暂无'}）"
+            for h in hotels
+        ]
+    weather = real_data.get("weather") or []
+    if weather:
+        lines.append("天气预报：")
+        lines += [f"- {w['date']} {w['dayweather']}，{w['nighttemp']}~{w['daytemp']}℃" for w in weather]
+    legs = real_data.get("legs") or []
+    if legs:
+        lines.append("相邻地点驾车通勤：")
+        lines += [f"- {leg['distance_km']} 公里，约 {leg['duration_min']} 分钟" for leg in legs]
+    if not lines:
+        return "（本次没有可调用的真实数据，按规则 5 处理）"
+    return "真实数据（高德地图查询结果，可直接采信）：\n" + "\n".join(lines)
+
+
+def generate_plan(content: str, users: list[str], real_data: dict | None = None) -> dict:
     if settings.llm_mock:
         return mock.generate_plan(content, users)
     try:
-        prompt = PLAN_PROMPT.format(wish=content, users="、".join(users))
+        prompt = PLAN_PROMPT.format(
+            wish=content, users="、".join(users), real_data=_format_real_data(real_data)
+        )
         result = deepseek.chat_json(prompt)
         return {
             "time": result.get("time", ""),
             "location": result.get("location", ""),
             "budget": result.get("budget", ""),
             "steps": list(result.get("steps", [])),
+            "links": [x for x in result.get("links", []) if isinstance(x, dict) and x.get("url")],
+            "disclaimer": result.get("disclaimer", ""),
         }
     except Exception as exc:  # noqa: BLE001
         _state.used_mock = True
@@ -205,6 +259,37 @@ def generate_user_profile(nickname: str, stats: dict, excerpts: list[str] | None
         _state.used_mock = True
         logger.warning("DeepSeek 画像失败，回退 mock：%s", exc)
         return mock.user_profile(nickname, stats, excerpts)
+
+
+def plan_chat(
+    wish: str,
+    plan: dict,
+    participants: list[str],
+    quotes: list[str],
+    history: list[dict],
+    message: str,
+) -> str:
+    """方案追问：上下文 = 愿望 + 已定方案 + 圈内公开语录 + 近 10 条对话。失败回退 mock。"""
+    if settings.llm_mock:
+        return mock.plan_chat(wish, message)
+    try:
+        history_text = "\n".join(
+            f"{'用户' if h.get('role') == 'user' else '助手'}：{h.get('content', '')}"
+            for h in history[-10:]
+        ) or "（还没有对话）"
+        prompt = PLAN_CHAT_PROMPT.format(
+            wish=wish,
+            participants="、".join(participants),
+            plan=json.dumps(plan, ensure_ascii=False),
+            quotes="\n".join(f"- {q}" for q in quotes) or "（暂无语录）",
+            history=history_text,
+            message=message,
+        )
+        return deepseek.chat(prompt).strip()
+    except Exception as exc:  # noqa: BLE001
+        _state.used_mock = True
+        logger.warning("DeepSeek 方案追问失败，回退 mock：%s", exc)
+        return mock.plan_chat(wish, message)
 
 
 def generate_pair_summary(name_a: str, name_b: str, levels: dict, topics: list[str], wish_count: int) -> str:

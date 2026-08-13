@@ -22,6 +22,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from app.config import settings  # noqa: E402
 from app.main import app  # noqa: E402
+from app.services import wishes as wishes_svc  # noqa: E402
 
 
 @pytest.fixture(scope="session")
@@ -210,9 +211,9 @@ def test_plan_participants_exclude_private(client: TestClient) -> None:
 
     wishes = client.get("/api/wishes", params={"circle_id": cid, "user_id": u2["user_id"]}).json()["wishes"]
     ya_wish = next(w for w in wishes if w["user_id"] == u2["user_id"] and "云海" in w["content"])
-    r = client.post(f"/api/wishes/{ya_wish['id']}/plan")
-    assert r.status_code == 200
-    participants = r.json().get("participants", [])
+    # 方案接口已改异步（见 BUG-003 共识）：参与人口径直调服务层验证
+    result = wishes_svc.generate_plan(ya_wish["id"])
+    participants = result.get("participants", [])
     assert "丫丫" in participants
     assert "阿澈" not in participants
 
@@ -303,9 +304,9 @@ def test_manual_private_wish_not_matched(client: TestClient) -> None:
     assert any("露营" in c["content"] for c in common)
     assert all("敦煌" not in c["content"] for c in common)
 
-    r = client.post(f"/api/wishes/{ya_dunhuang}/plan")
-    assert r.status_code == 200
-    participants = r.json().get("participants", [])
+    # 方案接口已改异步（见 BUG-003 共识）：参与人口径直调服务层验证
+    result = wishes_svc.generate_plan(ya_dunhuang)
+    participants = result.get("participants", [])
     assert "丫丫" in participants and "阿澈" not in participants
 
 

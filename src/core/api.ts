@@ -6,6 +6,7 @@
 import type { RequestFn } from "./http"
 import type {
   AccountCirclesResp,
+  ChatMessage,
   Circle,
   Comment,
   CommonWish,
@@ -181,13 +182,21 @@ export function createApi(req: RequestFn) {
         method: "DELETE",
       }),
 
+    // 勾选完成/取消（仅作者本人）：完成的愿望移出共同愿望匹配池，可逆
+    toggleWishDone: (id: string, user_id: string, done: boolean) =>
+      req<{ id: string; status: string }>(`/api/wishes/${id}/done`, {
+        method: "PUT",
+        body: { user_id, done },
+      }),
+
     commonWishes: (circle_id: string) =>
       req<{ common_wishes: CommonWish[] }>(`/api/wishes/common?circle_id=${circle_id}`),
 
-    wishPlan: (wish_id: string) =>
-      req<{ plan: WishPlan; participants?: string[]; cached?: boolean }>(
+    // 方案：有缓存直接返回；否则转后台异步生成（status=generating），前端轮询 + Web Push 兜底
+    wishPlan: (wish_id: string, user_id?: string) =>
+      req<{ plan: WishPlan; participants?: string[]; cached?: boolean; status?: string }>(
         `/api/wishes/${wish_id}/plan`,
-        { method: "POST" },
+        { method: "POST", body: { user_id } },
       ),
 
     listReports: (circle_id: string) =>
@@ -198,6 +207,16 @@ export function createApi(req: RequestFn) {
       }>(`/api/reports?circle_id=${circle_id}`),
 
     getReport: (id: string) => req<Report>(`/api/reports/${id}`),
+
+    // 方案追问（轻量对话）：记录按 用户×愿望 一条线程持久化
+    getPlanChat: (wish_id: string, user_id: string) =>
+      req<{ messages: ChatMessage[] }>(`/api/chat/plan/${wish_id}?user_id=${user_id}`),
+
+    sendPlanChat: (wish_id: string, user_id: string, message: string) =>
+      req<{ messages: ChatMessage[] }>(`/api/chat/plan/${wish_id}`, {
+        method: "POST",
+        body: { user_id, message },
+      }),
   }
 }
 

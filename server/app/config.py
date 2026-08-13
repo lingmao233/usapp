@@ -16,7 +16,7 @@ class Settings:
     # DeepSeek（OpenAI 兼容）
     DEEPSEEK_API_KEY: str = os.getenv("DEEPSEEK_API_KEY", "")
     DEEPSEEK_BASE_URL: str = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-    DEEPSEEK_MODEL: str = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
+    DEEPSEEK_MODEL: str = os.getenv("DEEPSEEK_MODEL", "")
 
     # 豆包 Embedding（火山方舟 OpenAI 兼容）
     DOUBAO_API_KEY: str = os.getenv("DOUBAO_API_KEY", "")
@@ -29,6 +29,9 @@ class Settings:
     DOUBAO_VISION_MODEL: str = os.getenv("DOUBAO_VISION_MODEL", "")
     # caption 调用的思考强度（minimal/low/medium/high），空 = 不传参；seed 类模型建议 minimal
     DOUBAO_VISION_REASONING: str = os.getenv("DOUBAO_VISION_REASONING", "")
+
+    # 高德 Web 服务（方案真实数据：POI/天气/通勤）：空 = 回退纯 LLM 经验方案
+    AMAP_KEY: str = os.getenv("AMAP_KEY", "")
 
     # Redis（可选，连不上自动降级进程内字典）
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")

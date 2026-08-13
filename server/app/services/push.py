@@ -142,6 +142,19 @@ def notify_comment(fragment_id: str, actor_id: str, content: str) -> None:
     run_task("push_comment", fragment_id, lambda: _send_to_user(frag["user_id"], payload))
 
 
+def notify_plan_ready(wish_id: str, user_id: str) -> None:
+    """方案生成完成 → 推给点击生成的用户。"""
+    row = get_conn().execute("SELECT content FROM wishes WHERE id = ?", (wish_id,)).fetchone()
+    if row is None:
+        return
+    payload = {
+        "title": "我们",
+        "body": f"「{row['content'][:20]}」的方案出炉了，来看看",
+        "url": "/wishes",
+    }
+    run_task("push_plan", wish_id, lambda: _send_to_user(user_id, payload))
+
+
 def notify_like(fragment_id: str, actor_id: str) -> None:
     """新点赞 → 推给碎片作者；作者自赞不推（取消赞在 API 层就不会调进来）。"""
     frag = get_conn().execute(
