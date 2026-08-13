@@ -85,3 +85,16 @@
 - **验证**：`test_persona.py` 补断言「绝不要写进报告」进 prompt；pytest 82/82。mock 桩不读模板，最终效果需真实 key 手测确认（POST /api/reports/generate 强刷）。
 - **预防**：prompt 模板里「给模型的指令」与「要渲染的输出结构」必须分区写明、禁止混排；新增模板段落时检查占位符上下文是否会被误读为输出章节。
 
+## BUG-006 高德强制绑定安全密钥后签名缺失，方案真实数据静默失效
+
+- **日期**：2026-08-14
+- **环境**：两端（代码问题，外部政策变更触发）
+- **现象**：高德开放平台新建 Web 服务 key 强制绑定安全密钥，绑定后不带 `sig` 的请求被拒（`INVALID_USER_SIGNATURE`）。`_get` 记 warning 返回 None，方案静默回退纯 LLM 经验推荐——用户无报错，但 POI/天气/通勤不再是真实数据。
+- **根因**：`server/app/services/amap.py` 的 `_get` 只传 `key` 参数，从未实现数字签名；高德新政使该路径必然失败。
+- **修复**：
+  - `amap.py`：新增 `_sig`（除 sig 外全部参数含 key 按名升序 `key=value&` 连接，末尾拼私钥后 MD5 小写）；`_get` 在 `AMAP_SECRET` 非空时自动带 sig，空则维持老行为
+  - `server/app/config.py`：新增 `AMAP_SECRET` 配置项（默认空）
+  - `.env.example`：补 `AMAP_SECRET` 说明（新 key 必填，未绑密钥的老 key 留空）
+- **验证**：新增 `tests/test_amap.py` 3 用例（含已知答案向量 md5("address=北京&key=testkey"+"testsecret") 锁定算法）；pytest 85/85。真实 key 联调待手测：curl 带 sig 请求返回 `"status":"1"` 即通。
+- **预防**：外部服务封装层的「失败静默回退」意味着政策/配额类故障无感知——手测新接入的外部 key 时用 curl 直验，不靠前端表现猜。
+

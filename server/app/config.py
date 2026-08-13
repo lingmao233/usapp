@@ -32,6 +32,8 @@ class Settings:
 
     # 高德 Web 服务（方案真实数据：POI/天气/通勤）：空 = 回退纯 LLM 经验方案
     AMAP_KEY: str = os.getenv("AMAP_KEY", "")
+    # 高德安全密钥（可选）：非空时每个请求自动带 sig 数字签名；空 = 不签名（兼容未绑密钥的老 key）
+    AMAP_SECRET: str = os.getenv("AMAP_SECRET", "")
 
     # Redis（可选，连不上自动降级进程内字典）
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")

@@ -3,7 +3,10 @@
 - 未配 AMAP_KEY（或任一查询失败）时各函数返回 None/[]，调用方整体回退纯 LLM 方案
 - 只读接口，个人开发者免费额度；v3 经典端点，字段全部防御性解析
 - 价格类数据高德不提供，方案里一律预估区间 + 跳转链接（见 prompts.PLAN_PROMPT 规则）
+- 数字签名（AMAP_SECRET 非空时）：除 sig 外全部参数（含 key）按参数名升序
+  key=value 用 & 连接，末尾拼安全密钥私钥后 MD5，作为 sig 参数发出
 """
+import hashlib
 import logging
 
 import httpx
@@ -16,14 +19,21 @@ _BASE = "https://restapi.amap.com"
 _TIMEOUT = 10.0
 
 
+def _sig(params: dict) -> str:
+    """数字签名：参数（含 key、不含 sig）按名升序拼接，末尾加私钥，MD5 小写。"""
+    base = "&".join(f"{k}={params[k]}" for k in sorted(params))
+    return hashlib.md5((base + settings.AMAP_SECRET).encode("utf-8")).hexdigest()
+
+
 def _get(path: str, params: dict) -> dict | None:
     """统一 GET：status=1 才返回 info 体，其余（含无 key/超限/网络异常）返回 None。"""
     if not settings.AMAP_KEY:
         return None
+    params = {**params, "key": settings.AMAP_KEY}
+    if settings.AMAP_SECRET:
+        params["sig"] = _sig(params)
     try:
-        resp = httpx.get(
-            f"{_BASE}{path}", params={**params, "key": settings.AMAP_KEY}, timeout=_TIMEOUT
-        )
+        resp = httpx.get(f"{_BASE}{path}", params=params, timeout=_TIMEOUT)
         resp.raise_for_status()
         data = resp.json()
         if str(data.get("status")) != "1":
