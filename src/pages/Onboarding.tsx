@@ -10,6 +10,7 @@ import {
 } from "@/lib/api"
 import CodeCustomizer from "@/components/CodeCustomizer"
 import { DEFAULT_PERSONA_KEY, PERSONA_PRESETS } from "@/lib/persona"
+import { copyText } from "@/lib/utils"
 
 function activeLabel(c: AccountCircle): string {
   if (c.fragment_count === 0) return "还没有碎片，等你来丢第一条"
@@ -18,21 +19,6 @@ function activeLabel(c: AccountCircle): string {
   if (diff < 3_600_000) return "刚刚有人丢碎片"
   if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前活跃`
   return `${Math.floor(diff / 86_400_000)} 天前活跃`
-}
-
-async function copyText(text: string): Promise<boolean> {
-  try {
-    await navigator.clipboard.writeText(text)
-    return true
-  } catch {
-    const ta = document.createElement("textarea")
-    ta.value = text
-    document.body.appendChild(ta)
-    ta.select()
-    const ok = document.execCommand("copy")
-    document.body.removeChild(ta)
-    return ok
-  }
 }
 
 /** 恢复码醒目展示卡：新建身份后必看，支持当场自定义 */
@@ -284,12 +270,11 @@ export default function Onboarding({
   }
 
   async function copyLookupCode(code: string, idx: number) {
-    try {
-      await navigator.clipboard.writeText(code)
+    if (await copyText(code)) {
       setCopiedIdx(idx)
       setTimeout(() => setCopiedIdx(null), 1500)
-    } catch {
-      /* 剪贴板不可用就静默 */
+    } else {
+      setError("复制失败，长按身份码手动复制")
     }
   }
 

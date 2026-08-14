@@ -10,6 +10,7 @@ import {
   type Session,
 } from "@/lib/api"
 import { enablePush, pushSupported, syncPushSubscription } from "@/lib/push"
+import { copyText } from "@/lib/utils"
 import {
   Dialog,
   DialogContent,
@@ -64,12 +65,10 @@ function IdentityCode({ onClose }: { onClose: () => void }) {
 
   async function copy() {
     if (!code) return
-    try {
-      await navigator.clipboard.writeText(code)
+    if (await copyText(code)) {
       setCopied(true)
-    } catch {
-      /* 剪贴板不可用时 select-all 兜底 */
     }
+    /* 失败时身份码文本带 select-all，长按/全选手动复制兜底 */
   }
 
   return (

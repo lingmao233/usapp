@@ -146,3 +146,13 @@
 - **验证**：`npm run build` + `weapp npx tsc --noEmit` 通过；前端无测试基座，靠手测：中文输入法打字选词不再触发查询，改输入后"没找到"立即消失。
 - **预防**：**所有中文输入框的 Enter 快捷提交一律带 `isComposing` 守卫**；异步查询结果必须与输入联动失效（输入即清），否则必现"灵异空态"。
 
+## BUG-010 找回面板的复制按钮点了没反应
+
+- **日期**：2026-08-14
+- **环境**：本机 dev（http 访问场景必现，生产 http://IP:8000 同在）
+- **现象**：按名字找回身份码的结果列表里，点「复制」按钮无任何反馈，剪贴板无内容。
+- **根因**：`copyLookupCode` 直接调 `navigator.clipboard.writeText`——该 API **仅在安全上下文（HTTPS 或 localhost）可用**；用 IP+端口走 http 访问时 `navigator.clipboard` 为 undefined，异常被静默 catch，表现为"点了没反应"。项目里其实早有带 `execCommand` 兜底的 `copyText`（Onboarding 本地函数），新代码没复用。
+- **修复**：`copyText` 提升到 `src/lib/utils.ts` 共享；`Onboarding.tsx` 找回复制改用它（失败提示"长按手动复制"），`App.tsx` 顶栏身份码复制同源修复。
+- **验证**：`npm run build` + `weapp npx tsc --noEmit` 通过；手测：http://IP 访问下点复制正常入剪贴板。
+- **预防**：**剪贴板写入一律走 `src/lib/utils.ts` 的 `copyText`**（clipboard API + execCommand 双通道），禁止直接调 `navigator.clipboard`；新功能复用工具函数前先全局搜一遍现有实现。
+
