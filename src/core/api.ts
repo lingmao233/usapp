@@ -79,6 +79,13 @@ export function createApi(req: RequestFn) {
         body: { recovery_code },
       }),
 
+    // 按名字找回身份码：特定码核验后返回 圈子名+身份码 列表
+    recoverLookup: (access_code: string, nickname: string) =>
+      req<{ results: { circle_name: string; nickname: string; recovery_code: string }[] }>(
+        "/api/accounts/recover-lookup",
+        { method: "POST", body: { access_code, nickname } },
+      ),
+
     getAccount: (account_id: string) =>
       req<{ account_id: string; nickname: string; recovery_code: string }>(
         `/api/accounts/${account_id}`,

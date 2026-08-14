@@ -1,9 +1,7 @@
 import { useState } from "react"
 import { api } from "@/lib/api"
 
-const VALID_RE = /^[A-HJ-KM-NP-Z2-9]{6}$/
-
-/** 身份码自定义：随机换一个（二次确认）+ 自己选一个（实时校验） */
+/** 身份码自定义：随机换一个（二次确认）+ 自己选一个（不限字符，≤64 字，全局唯一） */
 export default function CodeCustomizer({
   accountId,
   onChanged,
@@ -18,7 +16,7 @@ export default function CodeCustomizer({
   const [error, setError] = useState("")
   const [busy, setBusy] = useState(false)
 
-  const inputValid = VALID_RE.test(input.toUpperCase())
+  const inputValid = input.trim().length > 0 && input.trim().length <= 64
 
   async function handleReset() {
     if (!confirmReset) {
@@ -82,12 +80,12 @@ export default function CodeCustomizer({
         <div className="us-rise">
           <div className="flex gap-2 items-end">
             <input
-              className="us-input flex-1 tracking-[0.25em] text-center"
-              placeholder="6 位，字母+数字 2-9"
+              className="us-input flex-1 text-center"
+              placeholder="随便定：汉字、字母、数字都行"
               value={input}
-              maxLength={6}
+              maxLength={64}
               onChange={(e) => {
-                setInput(e.target.value.toUpperCase())
+                setInput(e.target.value)
                 setError("")
               }}
               onKeyDown={(e) => e.key === "Enter" && handleCustom()}
@@ -102,7 +100,7 @@ export default function CodeCustomizer({
           </div>
           {input.length > 0 && !inputValid && (
             <p className="text-xs text-stone-500 mt-1.5 text-center">
-              需要 6 位，只能用字母（不含 I/L/O）和数字 2-9
+              不能为空，最长 64 个字符
             </p>
           )}
           {error && <p className="text-xs text-red-700 mt-1.5 text-center">{error}</p>}

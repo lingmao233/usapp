@@ -10,12 +10,8 @@ from datetime import datetime
 
 from fastapi import HTTPException
 
-from ..db.database import (
-    RECOVERY_ALPHABET,
-    RECOVERY_LENGTH,
-    generate_recovery_code,
-    get_conn,
-)
+from ..config import settings
+from ..db.database import generate_recovery_code, get_conn
 
 MAX_MEMBERS = 14
 
@@ -226,13 +222,21 @@ def get_account(account_id: str) -> dict:
 
 
 def claim_account(recovery_code: str) -> dict:
-    """恢复码登录：大小写不敏感，兼容 6 位新码与存量 8 位码。"""
-    code = recovery_code.strip().upper()
-    account = get_conn().execute(
-        "SELECT * FROM accounts WHERE UPPER(recovery_code) = ?", (code,)
+    """身份码登录：先精确匹配（自定义码区分大小写、支持任意字符）；
+    没中再按 ASCII 大小写不敏感匹配（兼容存量 6/8 位字母数字码）。"""
+    code = recovery_code.strip()
+    if not code:
+        raise HTTPException(status_code=400, detail="填一下身份码")
+    conn = get_conn()
+    account = conn.execute(
+        "SELECT * FROM accounts WHERE recovery_code = ?", (code,)
     ).fetchone()
     if account is None:
-        raise HTTPException(status_code=404, detail="没找到这个恢复码，检查一下有没有输错")
+        account = conn.execute(
+            "SELECT * FROM accounts WHERE UPPER(recovery_code) = ?", (code.upper(),)
+        ).fetchone()
+    if account is None:
+        raise HTTPException(status_code=404, detail="没找到这个身份码，检查一下有没有输错")
     return {"account_id": account["id"], "nickname": account["nickname"]}
 
 
@@ -250,20 +254,18 @@ def reset_recovery_code(account_id: str) -> dict:
 
 
 def set_recovery_code(account_id: str, code: str) -> dict:
-    """自主选择身份码：6 位、限定字符集、全局唯一（大小写不敏感）。"""
+    """自主选择身份码：不限字符与长度（汉字/字母/数字/符号均可），仅要求非空、≤64 字、全局唯一。"""
     if _get_account(account_id) is None:
         raise HTTPException(status_code=404, detail="身份不存在")
-    normalized = code.strip().upper()
-    if len(normalized) != RECOVERY_LENGTH or any(
-        ch not in RECOVERY_ALPHABET for ch in normalized
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail=f"身份码必须是 {RECOVERY_LENGTH} 位，且只能包含字母（不含 I/L/O）和数字 2-9",
-        )
+    normalized = code.strip()
+    if not normalized:
+        raise HTTPException(status_code=400, detail="身份码不能为空")
+    if len(normalized) > 64:
+        raise HTTPException(status_code=400, detail="身份码最长 64 个字符")
+    # 唯一性：精确匹配 + ASCII 大小写折叠双查，防与存量码在 claim 端撞车
     exists = get_conn().execute(
-        "SELECT id FROM accounts WHERE UPPER(recovery_code) = ? AND id != ?",
-        (normalized, account_id),
+        "SELECT id FROM accounts WHERE (recovery_code = ? OR UPPER(recovery_code) = ?) AND id != ?",
+        (normalized, normalized.upper(), account_id),
     ).fetchone()
     if exists:
         raise HTTPException(status_code=409, detail="这个身份码已经被人用了，换一个")
@@ -273,6 +275,31 @@ def set_recovery_code(account_id: str, code: str) -> dict:
     )
     conn.commit()
     return {"account_id": account_id, "recovery_code": normalized}
+
+
+def lookup_recovery_codes(access_code: str, nickname: str) -> dict:
+    """按名字找回身份码（共享口令门）：特定码核验 → 按圈内昵称搜成员 → 圈子名+身份码列表。
+
+    特定码在 RECOVERY_ACCESS_CODES 配置（多个逗号分隔，汉字/字母均可），未配置一律拒绝。
+    注意：身份码即登录凭证，此接口对持码者是明文暴露——仅面向熟人小圈子场景，
+    特定码本身要当密码保管，泄露即换。
+    """
+    if not settings.RECOVERY_ACCESS_CODES or access_code.strip() not in settings.RECOVERY_ACCESS_CODES:
+        raise HTTPException(status_code=403, detail="特定码不对")
+    name = nickname.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="名字不能为空")
+    rows = get_conn().execute(
+        """SELECT c.name AS circle_name, u.nickname AS nickname, a.recovery_code AS recovery_code
+           FROM users u
+           JOIN circles c ON c.id = u.circle_id
+           JOIN memberships m ON m.user_id = u.id
+           JOIN accounts a ON a.id = m.account_id
+           WHERE u.nickname = ? AND a.recovery_code IS NOT NULL AND a.recovery_code != ''
+           ORDER BY c.created_at""",
+        (name,),
+    ).fetchall()
+    return {"results": [dict(r) for r in rows]}
 
 
 def list_members(circle_id: str) -> list[dict]:

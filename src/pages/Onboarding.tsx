@@ -122,6 +122,14 @@ export default function Onboarding({
   const [createdCode, setCreatedCode] = useState<string | null>(null)
   const [createdSession, setCreatedSession] = useState<Session | null>(null)
   const [recoveryShow, setRecoveryShow] = useState<{ code: string; session: Session } | null>(null)
+  // 按名字找回身份码（特定码门）
+  const [lookupOpen, setLookupOpen] = useState(false)
+  const [lookupCode, setLookupCode] = useState("")
+  const [lookupName, setLookupName] = useState("")
+  const [lookupResults, setLookupResults] = useState<
+    { circle_name: string; nickname: string; recovery_code: string }[] | null
+  >(null)
+  const [copiedIdx, setCopiedIdx] = useState<number | null>(null)
 
   // 有身份就拉"我的圈子"列表
   useEffect(() => {
@@ -238,7 +246,7 @@ export default function Onboarding({
 
   async function handleClaim() {
     if (!recoveryInput.trim()) {
-      setError("填一下恢复码")
+      setError("填一下身份码")
       return
     }
     setBusy(true)
@@ -253,6 +261,35 @@ export default function Onboarding({
       setError(e instanceof Error ? e.message : "出了点问题，再试一次")
     } finally {
       setBusy(false)
+    }
+  }
+
+  /** 按名字找回身份码：特定码 + 圈内昵称 → 列表展示，一键复制 */
+  async function handleLookup() {
+    if (!lookupCode.trim() || !lookupName.trim()) {
+      setError("特定码和名字都要填")
+      return
+    }
+    setBusy(true)
+    setError("")
+    try {
+      const res = await api.recoverLookup(lookupCode.trim(), lookupName.trim())
+      setLookupResults(res.results)
+    } catch (e) {
+      setLookupResults(null)
+      setError(e instanceof Error ? e.message : "出了点问题，再试一次")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function copyLookupCode(code: string, idx: number) {
+    try {
+      await navigator.clipboard.writeText(code)
+      setCopiedIdx(idx)
+      setTimeout(() => setCopiedIdx(null), 1500)
+    } catch {
+      /* 剪贴板不可用就静默 */
     }
   }
 
@@ -517,14 +554,13 @@ export default function Onboarding({
             <div>
               <label className="text-xs text-stone-500">身份恢复码</label>
               <input
-                className="us-input tracking-[0.3em]"
-                placeholder="6 位恢复码"
+                className="us-input"
+                placeholder="输入你的身份码"
                 value={recoveryInput}
-                onChange={(e) => setRecoveryInput(e.target.value.toUpperCase())}
-                maxLength={6}
+                onChange={(e) => setRecoveryInput(e.target.value)}
               />
               <p className="text-xs text-stone-400 mt-2">
-                第一次创建身份时展示过的那串字符
+                第一次创建身份时展示过的那串字符（后来自己改过的就用改后的）
               </p>
             </div>
             {error && <p className="text-sm text-red-700">{error}</p>}
@@ -535,6 +571,72 @@ export default function Onboarding({
               <button className="us-btn-ghost" onClick={() => setMode("choose")}>
                 返回
               </button>
+            </div>
+
+            {/* 按名字找回身份码（特定码门） */}
+            <div className="pt-4 border-t border-[#264653]/10">
+              <button
+                className="text-sm text-stone-400 hover:text-[#264653] transition-colors"
+                onClick={() => {
+                  setLookupOpen((v) => !v)
+                  setLookupResults(null)
+                  setError("")
+                }}
+              >
+                忘了身份码？按名字找回
+              </button>
+              {lookupOpen && (
+                <div className="flex flex-col gap-3 mt-3">
+                  <input
+                    className="us-input"
+                    placeholder="特定码（找圈主要）"
+                    value={lookupCode}
+                    onChange={(e) => setLookupCode(e.target.value)}
+                  />
+                  <input
+                    className="us-input"
+                    placeholder="你在圈子里的名字"
+                    value={lookupName}
+                    onChange={(e) => setLookupName(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && handleLookup()}
+                  />
+                  <button
+                    className="us-btn-ghost border border-[#264653]/15"
+                    disabled={busy}
+                    onClick={handleLookup}
+                  >
+                    {busy ? "查询中…" : "查一下"}
+                  </button>
+                  {lookupResults &&
+                    (lookupResults.length === 0 ? (
+                      <p className="text-xs text-stone-400 text-center">
+                        没有找到叫这个名字的成员
+                      </p>
+                    ) : (
+                      <div className="flex flex-col gap-2">
+                        {lookupResults.map((r, i) => (
+                          <div
+                            key={i}
+                            className="flex items-center justify-between bg-white/60 rounded-xl px-4 py-3"
+                          >
+                            <div>
+                              <p className="text-xs text-stone-500">
+                                {r.circle_name} · {r.nickname}
+                              </p>
+                              <p className="text-base font-medium">{r.recovery_code}</p>
+                            </div>
+                            <button
+                              className="us-btn-ghost text-xs border border-[#264653]/15"
+                              onClick={() => copyLookupCode(r.recovery_code, i)}
+                            >
+                              {copiedIdx === i ? "已复制 ✓" : "复制"}
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    ))}
+                </div>
+              )}
             </div>
           </div>
         )}

@@ -239,12 +239,12 @@ RECOVERY_LENGTH = 6  # 新码 6 位；存量 8 位码依然有效（claim 兼容
 
 
 def generate_recovery_code() -> str:
-    """生成全局唯一的 8 位恢复码。"""
+    """生成全局唯一的 6 位随机码（存量 8 位码依然有效；与自定义码按 ASCII 折叠查重）。"""
     conn = get_conn()
     while True:
         code = "".join(random.choices(RECOVERY_ALPHABET, k=RECOVERY_LENGTH))
         exists = conn.execute(
-            "SELECT 1 FROM accounts WHERE recovery_code = ?", (code,)
+            "SELECT 1 FROM accounts WHERE UPPER(recovery_code) = ?", (code,)
         ).fetchone()
         if not exists:
             return code

@@ -14,9 +14,20 @@ class SetCodeIn(BaseModel):
     code: str
 
 
+class RecoverLookupIn(BaseModel):
+    access_code: str
+    nickname: str
+
+
 @router.post("/claim")
 def claim_account(body: ClaimIn):
     return svc.claim_account(body.recovery_code)
+
+
+@router.post("/recover-lookup")
+def recover_lookup(body: RecoverLookupIn):
+    """按名字找回身份码：特定码核验后返回 圈子名+身份码 列表。"""
+    return svc.lookup_recovery_codes(body.access_code, body.nickname)
 
 
 @router.get("/{account_id}")
