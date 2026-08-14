@@ -98,3 +98,39 @@
 - **验证**：新增 `tests/test_amap.py` 3 用例（含已知答案向量 md5("address=北京&key=testkey"+"testsecret") 锁定算法）；pytest 85/85。真实 key 联调待手测：curl 带 sig 请求返回 `"status":"1"` 即通。
 - **预防**：外部服务封装层的「失败静默回退」意味着政策/配额类故障无感知——手测新接入的外部 key 时用 curl 直验，不靠前端表现猜。
 
+## BUG-007 方案把人名当店名让大家去高德搜 + 单模板只会写"一起去"
+
+- **日期**：2026-08-14
+- **环境**：两端（真实 key 下生成质量缺陷）
+- **现象**：愿望「想找欧培昇玩」（人名）生成的方案让用户"用高德地图搜索'欧培昇'确定具体地址"；且无论愿望是什么，方案都是同一个"一起去"出行模板，无真实数据时步骤仍围绕地图搜索展开。
+- **根因**（两条）：
+  1. `PLAN_EXTRACT_PROMPT` 只做"提取 city/keywords"，不判断愿望类型——人名被当 POI 关键词送高德，搜不到 → `real_data` 为空。
+  2. `PLAN_PROMPT` 规则只覆盖"有真实数据怎么采信"，没约束"没有真实数据时不得把愿望原文词当店名/地名"，LLM 自由发挥成"去地图搜一下 XX"。
+- **修复**：
+  - `PLAN_EXTRACT_PROMPT` 升级为愿望分析：输出 `kind`（六选一枚举：outing 出行/learning 学习/dining 聚餐/activity 活动购物/meet 约人/venting 情绪倾诉）+ `scene` + `city`/`keywords` + `need_real_data`；meet/venting 强制不查高德
+  - `prompts.py` 新增 `PLAN_KINDS`：每种类型**写死实现路径要点**（如 venting=一本正经玩梗逗开心（含示例梗）、收尾落真实小行动、绝不复述被吐槽的人名、不拿别人开涮；meet=围绕怎么约/凑时间/选活动）——LLM 只选类型，不许自己发明实现路径
+  - `wishes.py` `_real_plan_context` → `_plan_context`：返回 `(analysis, real_data)`，`need_real_data=False`、无 keywords 或未配 key 时不查高德
+  - `ai.build_plan_prompt` 纯函数按 kind 注入路径要点（非法 kind 回退 activity）；`PLAN_PROMPT` 规则覆盖有/无真实数据两分支，无数据时严禁把愿望原文词（尤其人名）当店名
+  - 类型人格（2026-08-14 共识）：`PLAN_KIND_PERSONAS` 六类人格写死（方案=类型人格，周报=圈人格）；分析步加 `mood` 枚举，venting 双形态——消极情绪换树洞人设不玩梗，非消极走损友玩梗（约束清单见 `docs/方案生成-类型人格与约束.md`）
+  - `ai.extract_plan_query` 解析新字段（need_real_data 防御字符串布尔、kind 校验枚举）；mock 桩确定性产出（activity + 恒 True 维持旧行为）
+- **验证**：`tests/test_amap.py` 8 用例（签名 3 + 上下文分支 3 + 纯函数路径/双形态断言 1 + 真实路径解析 1）；pytest 91/91；smoke 48 断言。生成效果需真实 key 手测（样例集见约束文档 §6）。
+- **预防**：LLM 结构化输出的枚举/布尔字段要做防御解析；prompt 规则要同时覆盖"有数据"与"无数据"两个分支；**愿望类型用枚举收敛 + 服务端写死实现路径**，自由文本类型描述会被 LLM 自由发挥。另：高德 key 必须建「Web 服务」类型（JS API 类型报 USERKEY_PLAT_NOMATCH），本机已踩过。
+
+## BUG-008 共同愿望区块三连环：重算清空、DeepSeek 超时、建议无人格
+
+- **日期**：2026-08-14
+- **环境**：本机 dev（真实 key）
+- **现象**：① 加新愿望后共同愿望区块长时间空白（旧结果不可用）；② 日志 `DeepSeek 愿望匹配失败，回退仅用相似度：The read operation timed out`；③ 「想暴富」的共同愿望建议写成"线上理财规划课程、基金定投"式的正经文案，无类型人格。
+- **根因**（三条独立）：
+  1. `GET /api/wishes/common` 指纹未命中时**同步**跑 embedding 聚类 + LLM 确认（最长 60s+），请求期间前端只有空态可显示。
+  2. `deepseek.chat_json` 无 timeout 参数，默认 60s 对多候选的 WISH_MATCH_PROMPT 不够，read timeout 后回退相似度（degraded 已落 task_runs，属实非故障）。
+  3. **用户看到的"方案感"文案其实是共同愿望卡片的 `suggestion` 字段**，由 `WISH_MATCH_PROMPT` 生成——该 prompt 自 PRD 以来从未接入类型人格体系（BUG-007 的人格只接到了 PLAN_PROMPT 的方案路径），所以"想暴富"被当成正经理财需求出建议。task_runs 无任何 wish_plan 记录、wish.plan 为空可证方案路径根本没被点过。
+- **修复**：
+  - `wishes.py`：`common_wishes` 改 **stale-while-revalidate**——指纹变先返回旧结果 + `refreshing` 标记（旗标防抖 120s 窗口），新增 `refresh_common_wishes` 后台重算写缓存；`api/wishes.py` 路由按 "trigger" 放 BackgroundTasks；`nightly._pregen_plans` 批处理场景检测过期则同步重算
+  - `Wishes.tsx`：新增 `refreshCommon` 轮询（陈旧结果先上屏，3s 轮询收敛后一次性换新），空态加"AI 正在发现共同愿望…"；`src/core/api.ts` 响应类型加 `refreshing?`
+  - `deepseek.chat_json` 加 `timeout` 参数，`confirm_common_wishes` 放宽到 120s
+  - `WISH_MATCH_PROMPT` 补分类型出招指引（出行/学习/吃喝/购物/约人/玩梗/消极情绪七类），消极情绪不玩梗先接住情绪，人名/对抗性建议禁令与方案护栏对齐
+  - 适配：test_plans `_common` 与 smoke 第 6 节改轮询式；3 处直调测试（test_memory/test_visibility×2）同步适配
+- **验证**：新增 stale 直返断言 + WISH_MATCH_PROMPT 指引断言；pytest 93/93；smoke 48 断言；`npm run build` + weapp tsc 通过；本机 `common_wishes_cache` 已清，下次访问按新 prompt 重算。真实 key 手测待用户确认"想暴富"建议变玩梗口吻。
+- **预防**：**同一用户感知区有多条生成路径时（方案 plan / 建议 suggestion），人格与护栏改造要逐路径排查**，不能假设只此一条；慢 LLM 调用一律不许堵在请求路径上（ stale-while-revalidate 或后台任务 + push）；外部 API 超时参数要显式可配。
+

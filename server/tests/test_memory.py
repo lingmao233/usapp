@@ -247,8 +247,12 @@ def test_common_wishes_component(client: TestClient) -> None:
     _wait_processed(client, _post(client, cid, u1["user_id"], "想去露营看星星"), u1["user_id"])
     _wait_processed(client, _post(client, cid, u2["user_id"], "想去露营看星星"), u2["user_id"])
 
-    # 匹配管线走任务层
-    common = client.get("/api/wishes/common", params={"circle_id": cid}).json()["common_wishes"]
+    # 匹配管线走任务层（stale-while-revalidate：轮询到后台重算完成）
+    for _ in range(20):
+        cr = client.get("/api/wishes/common", params={"circle_id": cid}).json()
+        if not cr.get("refreshing"):
+            break
+    common = cr["common_wishes"]
     assert any("露营" in c["content"] for c in common)
     db = _db()
     run_row = db.execute(

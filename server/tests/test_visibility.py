@@ -190,7 +190,12 @@ def test_private_wish_not_in_common(client: TestClient) -> None:
     for fid, uid in ((w1, u1["user_id"]), (w2, u2["user_id"]), (w3, u1["user_id"]), (w4, u2["user_id"])):
         _wait_processed(client, fid, uid)
 
-    common = client.get("/api/wishes/common", params={"circle_id": cid}).json()["common_wishes"]
+    # stale-while-revalidate：轮询到后台重算完成（TestClient 同步跑后台任务）
+    for _ in range(20):
+        cr = client.get("/api/wishes/common", params={"circle_id": cid}).json()
+        if not cr.get("refreshing"):
+            break
+    common = cr["common_wishes"]
     assert any("露营" in c["content"] for c in common)
     assert all("极光" not in c["content"] for c in common)
 
@@ -300,7 +305,12 @@ def test_manual_private_wish_not_matched(client: TestClient) -> None:
     r = client.post("/api/wishes", json={"circle_id": cid, "user_id": u2["user_id"], "content": "想去敦煌看壁画"})
     ya_dunhuang = r.json()["id"]
 
-    common = client.get("/api/wishes/common", params={"circle_id": cid}).json()["common_wishes"]
+    # stale-while-revalidate：轮询到后台重算完成（TestClient 同步跑后台任务）
+    for _ in range(20):
+        cr = client.get("/api/wishes/common", params={"circle_id": cid}).json()
+        if not cr.get("refreshing"):
+            break
+    common = cr["common_wishes"]
     assert any("露营" in c["content"] for c in common)
     assert all("敦煌" not in c["content"] for c in common)
 

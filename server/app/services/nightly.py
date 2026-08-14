@@ -17,9 +17,14 @@ logger = logging.getLogger("us.nightly")
 def _pregen_plans(circle_id: str) -> None:
     """预生成：本圈共同愿望里还没有方案的，逐簇生成（已有的走缓存秒回，不重复调 LLM）。
 
-    匹配读 common_wishes 的圈级缓存——池子没变时零 LLM 调用。
+    匹配读 common_wishes 的圈级缓存——池子没变时零 LLM 调用；缓存过期时
+    批处理场景同步重算（接口的 stale-while-revalidate 只适用于请求路径）。
     """
-    for c in wishes.common_wishes(circle_id)["common_wishes"]:
+    out = wishes.common_wishes(circle_id)
+    if out.get("refreshing"):
+        wishes.refresh_common_wishes(circle_id)
+        out = wishes.common_wishes(circle_id)
+    for c in out["common_wishes"]:
         wid = (c.get("wish_ids") or [""])[0]
         if wid:
             wishes.generate_plan(wid)

@@ -165,8 +165,15 @@ def wish_suggestion(content: str, users: list[str]) -> str:
 
 
 def extract_plan_query(content: str) -> dict:
-    """确定性目的地提取桩：city 永远为空（桩不懂地理），keywords 用原文截断。"""
-    return {"city": "", "keywords": content[:10] or "周边游"}
+    """确定性愿望分析桩：不懂地理与人名，恒为 activity + 需要真实数据（维持旧行为）。"""
+    return {
+        "kind": "activity",
+        "scene": "",
+        "city": "",
+        "keywords": content[:10] or "周边游",
+        "need_real_data": True,
+        "mood": "neutral",
+    }
 
 
 def generate_plan(content: str, users: list[str]) -> dict:

@@ -10,6 +10,7 @@ from fastapi import HTTPException
 
 from .. import ai
 from ..config import settings
+from ..db import cache
 from ..db.database import cosine, decode_embedding, encode_embedding, get_conn
 from . import amap, tasks
 
@@ -136,20 +137,39 @@ def set_wish_done(wish_id: str, user_id: str, done: bool) -> dict:
 
 
 def common_wishes(circle_id: str) -> dict:
-    """共同愿望匹配（圈级缓存）：匹配池指纹一致直接返回缓存，变化才经任务层重算。
+    """共同愿望匹配（圈级缓存 + stale-while-revalidate）。
 
     指纹 = 圈内全部愿望的 id/状态/向量就绪标记的哈希——增删愿望、勾选完成、
     向量就绪都会改变指纹，缓存因此自失效，无需在写路径手动清。
+
+    指纹一致直接返回缓存；不一致时**旧结果照旧返回**（refreshing=True），重算
+    交给后台（路由层按 "trigger" 放 BackgroundTasks），请求不再阻塞在 LLM 上。
     """
     conn = get_conn()
     fp = _pool_fingerprint(conn, circle_id)
-    cached = conn.execute(
-        "SELECT result FROM common_wishes_cache WHERE circle_id = ? AND fingerprint = ?",
-        (circle_id, fp),
+    row = conn.execute(
+        "SELECT fingerprint, result FROM common_wishes_cache WHERE circle_id = ?",
+        (circle_id,),
     ).fetchone()
-    if cached:
-        return {"common_wishes": json.loads(cached["result"])}
+    if row and row["fingerprint"] == fp:
+        return {"common_wishes": json.loads(row["result"]), "refreshing": False}
+    # 旗标防抖：一次重算进行中的重复请求只返回陈旧结果，不重复触发
+    flag = f"common_wishes_refreshing:{circle_id}"
+    refreshing: bool | str = True
+    if not cache.client.get(flag):
+        cache.client.set(flag, "1", ex=120)
+        refreshing = "trigger"
+    stale = json.loads(row["result"]) if row else []
+    return {"common_wishes": stale, "refreshing": refreshing}
 
+
+def refresh_common_wishes(circle_id: str) -> None:
+    """后台重算共同愿望并写缓存（stale-while-revalidate 的 revalidate 半）。
+
+    失败保留旧缓存（task_runs 已记失败），下次请求重新触发；
+    完成后清旗标，后续指纹变化可立即再触发。
+    """
+    flag = f"common_wishes_refreshing:{circle_id}"
     results: list[dict] = []
 
     def _job() -> None:
@@ -157,16 +177,18 @@ def common_wishes(circle_id: str) -> dict:
         results = compute_common_wishes(circle_id)
 
     if tasks.run_task("common_wishes", circle_id, _job) == "failed":
-        raise HTTPException(status_code=500, detail="共同愿望匹配失败，请稍后重试")
+        cache.client.delete(flag)
+        return
+    conn = get_conn()
     conn.execute(
         """INSERT INTO common_wishes_cache (circle_id, fingerprint, result, updated_at)
            VALUES (?, ?, ?, ?)
            ON CONFLICT(circle_id) DO UPDATE SET fingerprint=excluded.fingerprint,
                result=excluded.result, updated_at=excluded.updated_at""",
-        (circle_id, fp, json.dumps(results, ensure_ascii=False), _now()),
+        (circle_id, _pool_fingerprint(conn, circle_id), json.dumps(results, ensure_ascii=False), _now()),
     )
     conn.commit()
-    return {"common_wishes": results}
+    cache.client.delete(flag)
 
 
 def _pool_fingerprint(conn, circle_id: str) -> str:
@@ -337,7 +359,10 @@ def generate_plan(wish_id: str) -> dict:
                 participants.append(other["user_nickname"])
     participants = sorted(set(participants))
 
-    plan = ai.generate_plan(row["content"], participants, real_data=_real_plan_context(row["content"]))
+    analysis, real_data = _plan_context(row["content"])
+    plan = ai.generate_plan(
+        row["content"], participants, real_data=real_data, analysis=analysis
+    )
     # 只缓存方案，不改状态：愿望是否完成只由用户勾选决定（matched 语义已下线）。
     # participants 一并落库：缓存命中/方案追问时仍拿得到参与人
     conn.execute(
@@ -348,13 +373,18 @@ def generate_plan(wish_id: str) -> dict:
     return {"plan": plan, "participants": participants, "cached": False}
 
 
-def _real_plan_context(content: str) -> dict | None:
-    """方案真实数据（高德）：未配 AMAP_KEY 或查询失败返回 None，prompt 走纯经验模式。"""
-    if not settings.AMAP_KEY:
-        return None
+def _plan_context(content: str) -> tuple[dict, dict | None]:
+    """方案上下文（LLM 愿望分析 + 高德真实数据）。
+
+    先由 LLM 判断愿望类型：围绕真实地点/品类的愿望才查高德（need_real_data）；
+    人名/"约人"类愿望不查——把名字当 POI 搜只会得到噪声。real_data 为 None 时
+    prompt 走纯经验模式（未配 AMAP_KEY / 分析判定不需要 / 高德查询失败）。
+    """
+    q = ai.extract_plan_query(content)
+    if not settings.AMAP_KEY or not q.get("need_real_data", True) or not q.get("keywords"):
+        return q, None
     try:
-        q = ai.extract_plan_query(content)
-        return amap.gather(q["city"], q["keywords"])
+        return q, amap.gather(q["city"], q["keywords"])
     except Exception as exc:  # noqa: BLE001
         logger.warning("高德真实数据查询失败，回退纯经验方案：%s", exc)
-        return None
+        return q, None

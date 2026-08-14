@@ -30,9 +30,9 @@ def chat(prompt: str, json_mode: bool = False, timeout: float = 60.0) -> str:
     return resp.json()["choices"][0]["message"]["content"]
 
 
-def chat_json(prompt: str) -> dict:
+def chat_json(prompt: str, timeout: float = 60.0) -> dict:
     """调用并解析 JSON 输出，容错提取第一个 {...} 块。"""
-    text = chat(prompt, json_mode=True)
+    text = chat(prompt, json_mode=True, timeout=timeout)
     try:
         return json.loads(text)
     except json.JSONDecodeError:

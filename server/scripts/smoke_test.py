@@ -118,8 +118,13 @@ def run_all(client: TestClient) -> None:
     check("语义搜索有结果且相似度为正", len(results) >= 1 and results[0]["similarity"] > 0,
           f"top 相似度 {results[0]['similarity'] if results else '-'}")
 
-    # 6. 共同愿望匹配
-    common = client.get("/api/wishes/common", params={"circle_id": cid}).json()["common_wishes"]
+    # 6. 共同愿望匹配（stale-while-revalidate：首轮可能 refreshing，轮询收敛；TestClient 内联跑后台任务）
+    common = []
+    for _ in range(20):
+        cr = client.get("/api/wishes/common", params={"circle_id": cid}).json()
+        common = cr["common_wishes"]
+        if not cr.get("refreshing"):
+            break
     check("共同愿望匹配出结果", len(common) >= 1,
           "; ".join(f"「{c['content']}」by {'&'.join(c['matched_users'])} ({c['confidence']})" for c in common))
     check("共同愿望是跨用户的", all(len(set(c["matched_users"])) >= 2 for c in common))

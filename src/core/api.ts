@@ -190,7 +190,8 @@ export function createApi(req: RequestFn) {
       }),
 
     commonWishes: (circle_id: string) =>
-      req<{ common_wishes: CommonWish[] }>(`/api/wishes/common?circle_id=${circle_id}`),
+      // stale-while-revalidate：refreshing=true 时 common_wishes 是旧结果，前端轮询收敛
+      req<{ common_wishes: CommonWish[]; refreshing?: boolean }>(`/api/wishes/common?circle_id=${circle_id}`),
 
     // 方案：有缓存直接返回；否则转后台异步生成（status=generating），前端轮询 + Web Push 兜底
     wishPlan: (wish_id: string, user_id?: string) =>

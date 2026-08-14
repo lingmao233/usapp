@@ -14,9 +14,12 @@ from .prompts import (
     PERSONAS,
     PLAN_CHAT_PROMPT,
     PLAN_EXTRACT_PROMPT,
+    PLAN_KIND_PERSONAS,
+    PLAN_KINDS,
     PLAN_PROMPT,
     SUMMARY_PROMPT,
     USER_PROFILE_PROMPT,
+    VENTING_NEGATIVE_PERSONA,
     WEEKLY_REPORT_PROMPT,
     WISH_MATCH_PROMPT,
 )
@@ -178,7 +181,8 @@ def confirm_common_wishes(wishes_repr: str) -> list[dict]:
     if settings.llm_mock:
         return []
     try:
-        result = deepseek.chat_json(WISH_MATCH_PROMPT.format(wishes=wishes_repr))
+        # 确认在后台重算里跑，放宽到 120s（默认 60s 曾 read timeout 回退相似度，BUG-008）
+        result = deepseek.chat_json(WISH_MATCH_PROMPT.format(wishes=wishes_repr), timeout=120.0)
         return list(result.get("common_wishes", []))
     except Exception as exc:  # noqa: BLE001
         _state.used_mock = True
@@ -191,18 +195,37 @@ def wish_suggestion(content: str, users: list[str]) -> str:
 
 
 def extract_plan_query(content: str) -> dict:
-    """从愿望文本提取目的地（city/keywords），供高德真实数据查询；失败回退原文当关键词。"""
+    """愿望分析：判定类型（kind 枚举）+ 提取地图查询参数（city/keywords）。
+
+    实现路径由 PLAN_KINDS 按 kind 写死，LLM 只选类型。kind 非法回退 activity；
+    need_real_data 与 keywords 联动——没有可搜的品类词就不查（防人名当 POI）。
+    失败回退「原文当关键词 + activity」的旧行为。
+    """
     if settings.llm_mock:
         return mock.extract_plan_query(content)
     try:
         result = deepseek.chat_json(PLAN_EXTRACT_PROMPT.format(wish=content))
+        need = result.get("need_real_data", True)
+        if isinstance(need, str):  # 防御 LLM 把布尔写成字符串
+            need = need.strip().lower() in ("true", "1", "是")
+        keywords = str(result.get("keywords", "")).strip()[:20]
+        kind = str(result.get("kind", "")).strip().lower()
+        if kind not in PLAN_KINDS:
+            kind = "activity"
+        mood = str(result.get("mood", "")).strip().lower()
+        if mood not in ("negative", "neutral", "playful"):
+            mood = "neutral"
         return {
+            "kind": kind,
+            "scene": str(result.get("scene", "")).strip()[:50],
             "city": str(result.get("city", "")).strip(),
-            "keywords": (str(result.get("keywords", "")).strip() or content)[:20],
+            "keywords": keywords,
+            "need_real_data": bool(need) and bool(keywords),
+            "mood": mood,
         }
     except Exception as exc:  # noqa: BLE001
         _state.used_mock = True
-        logger.warning("DeepSeek 目的地提取失败，回退原文关键词：%s", exc)
+        logger.warning("DeepSeek 愿望分析失败，回退原文关键词：%s", exc)
         return mock.extract_plan_query(content)
 
 
@@ -238,13 +261,44 @@ def _format_real_data(real_data: dict | None) -> str:
     return "真实数据（高德地图查询结果，可直接采信）：\n" + "\n".join(lines)
 
 
-def generate_plan(content: str, users: list[str], real_data: dict | None = None) -> dict:
+def build_plan_prompt(
+    content: str,
+    users: list[str],
+    real_data: dict | None = None,
+    analysis: dict | None = None,
+) -> str:
+    """方案 prompt 组装（纯函数）：kind 决定实现路径与类型人格；非法 kind 回退 activity。
+
+    venting 双形态：analysis.mood == 'negative' 换树洞人格（消极情绪不玩梗）。
+    """
+    analysis = analysis or {}
+    kind = analysis.get("kind") or ""
+    kind_label, kind_strategy = PLAN_KINDS.get(kind, PLAN_KINDS["activity"])
+    if kind == "venting" and analysis.get("mood") == "negative":
+        persona = VENTING_NEGATIVE_PERSONA
+    else:
+        persona = PLAN_KIND_PERSONAS.get(kind, PLAN_KIND_PERSONAS["activity"])
+    return PLAN_PROMPT.format(
+        wish=content,
+        users="、".join(users),
+        persona=persona,
+        kind_label=kind_label,
+        scene=analysis.get("scene") or "（未预判）",
+        kind_strategy=kind_strategy,
+        real_data=_format_real_data(real_data),
+    )
+
+
+def generate_plan(
+    content: str,
+    users: list[str],
+    real_data: dict | None = None,
+    analysis: dict | None = None,
+) -> dict:
     if settings.llm_mock:
         return mock.generate_plan(content, users)
     try:
-        prompt = PLAN_PROMPT.format(
-            wish=content, users="、".join(users), real_data=_format_real_data(real_data)
-        )
+        prompt = build_plan_prompt(content, users, real_data, analysis)
         result = deepseek.chat_json(prompt)
         return {
             "time": result.get("time", ""),

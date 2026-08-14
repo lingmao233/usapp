@@ -66,6 +66,26 @@ export default function Wishes({ session }: { session: Session }) {
   const [loaded, setLoaded] = useState(false)
   // 已完成愿望区块：默认折叠
   const [showDone, setShowDone] = useState(false)
+  // 共同愿望后台重算中（旧结果照旧展示）
+  const [commonRefreshing, setCommonRefreshing] = useState(false)
+
+  // 共同愿望走 stale-while-revalidate：后台重算期间旧结果照旧展示，refreshing 收敛后一次性换新
+  const refreshCommon = useCallback(async () => {
+    const deadline = Date.now() + 90_000
+    for (;;) {
+      try {
+        const c = await api.commonWishes(session.circle_id)
+        setCommon(c.common_wishes) // 陈旧结果也先上屏（服务端保留的旧数据）
+        setCommonRefreshing(!!c.refreshing)
+        if (!c.refreshing) return
+      } catch {
+        setCommonRefreshing(false)
+        return /* 静默，保持现状 */
+      }
+      if (Date.now() > deadline) return
+      await new Promise((r) => setTimeout(r, 3000))
+    }
+  }, [session.circle_id])
 
   const load = useCallback(async () => {
     // 两个请求独立成败：共同愿望匹配重、偶发失败，不拖垮愿望列表的展示
@@ -82,13 +102,8 @@ export default function Wishes({ session }: { session: Session }) {
       /* 静默，保持现状 */
     }
     setLoaded(true)
-    try {
-      const c = await api.commonWishes(session.circle_id)
-      setCommon(c.common_wishes)
-    } catch {
-      /* 静默 */
-    }
-  }, [session.circle_id, session.user_id])
+    void refreshCommon()
+  }, [session.circle_id, session.user_id, refreshCommon])
 
   useEffect(() => {
     load()
@@ -165,8 +180,8 @@ export default function Wishes({ session }: { session: Session }) {
     try {
       await api.toggleWishDone(w.id, session.user_id, done)
       setWishes((ws) => ws.map((x) => (x.id === w.id ? { ...x, status: done ? "done" : "active" } : x)))
-      // 匹配池变了，共同愿望重拉一次
-      api.commonWishes(session.circle_id).then((c) => setCommon(c.common_wishes)).catch(() => {})
+      // 匹配池变了，共同愿望重拉一次（旧结果保留展示，后台重算完再换）
+      void refreshCommon()
     } catch {
       /* 失败保持现状，用户可重试 */
     }
@@ -224,9 +239,11 @@ export default function Wishes({ session }: { session: Session }) {
         <h3 className="us-serif text-lg mb-3">我们的共同愿望</h3>
         {common.length === 0 ? (
           <p className="text-sm text-stone-400 leading-relaxed">
-            {loaded
-              ? "还没有撞在一起的愿望。等你们各自多丢几条，AI 会发现“原来你也想”。"
-              : "加载中…"}
+            {commonRefreshing
+              ? "AI 正在发现共同愿望…"
+              : loaded
+                ? "还没有撞在一起的愿望。等你们各自多丢几条，AI 会发现“原来你也想”。"
+                : "加载中…"}
           </p>
         ) : (
           <div className="flex flex-col gap-4">

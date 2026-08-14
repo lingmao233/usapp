@@ -61,7 +61,15 @@ def _add_wish(client: TestClient, cid: str, uid: str, content: str) -> str:
 
 
 def _common(client: TestClient, cid: str) -> list:
-    return client.get("/api/wishes/common", params={"circle_id": cid}).json()["common_wishes"]
+    """拉共同愿望：stale-while-revalidate 下首轮可能返回旧结果 + refreshing，轮询到刷新完成。
+
+    TestClient 会同步执行 BackgroundTasks，第二轮必为新鲜结果。
+    """
+    for _ in range(20):
+        r = client.get("/api/wishes/common", params={"circle_id": cid}).json()
+        if not r.get("refreshing"):
+            return r["common_wishes"]
+    raise AssertionError("共同愿望刷新未收敛")
 
 
 # ---------- 勾选完成 ↔ 匹配池 ----------
@@ -150,6 +158,26 @@ def test_common_wishes_cache_and_fingerprint_invalidation(client: TestClient) ->
     # 勾选完成同样触发重算并把愿望移出池子
     client.put(f"/api/wishes/{w3}/done", json={"user_id": u1["user_id"], "done": True})
     assert all("看展" not in c["content"] for c in _common(client, cid))
+
+
+def test_common_wishes_stale_while_revalidate(client: TestClient) -> None:
+    """指纹变化时接口不阻塞：先返回旧结果（refreshing=True），后台重算后第二轮拿到新结果。"""
+    cid, u1, u2 = _make_circle(client)
+    _add_wish(client, cid, u1["user_id"], "想去露营看星星")
+    _add_wish(client, cid, u2["user_id"], "想去露营看星星")
+    first = _common(client, cid)
+    assert any("露营" in c["content"] for c in first)
+
+    # 新愿望入池 → 指纹变：首轮返回旧结果并标记 refreshing（不阻塞等待 LLM）
+    _add_wish(client, cid, u1["user_id"], "想去潜水")
+    _add_wish(client, cid, u2["user_id"], "想去潜水")
+    r1 = client.get("/api/wishes/common", params={"circle_id": cid}).json()
+    assert r1["refreshing"] is True
+    assert r1["common_wishes"] == first
+    # TestClient 同步跑完后台重算：第二轮即为新鲜结果
+    r2 = client.get("/api/wishes/common", params={"circle_id": cid}).json()
+    assert r2["refreshing"] is False
+    assert any("潜水" in c["content"] for c in r2["common_wishes"])
 
 
 # ---------- 每晚预生成 ----------

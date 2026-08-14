@@ -33,8 +33,13 @@ def add_wish(body: AddWishIn, background_tasks: BackgroundTasks):
 
 
 @router.get("/common")
-def common_wishes(circle_id: str):
-    return svc.common_wishes(circle_id)
+def common_wishes(circle_id: str, background_tasks: BackgroundTasks):
+    """共同愿望：缓存新鲜直返；过期先返回旧结果（refreshing=True），后台重算，前端轮询收敛。"""
+    out = svc.common_wishes(circle_id)
+    if out.get("refreshing") == "trigger":
+        background_tasks.add_task(svc.refresh_common_wishes, circle_id)
+        out["refreshing"] = True
+    return out
 
 
 @router.delete("/{wish_id}")
