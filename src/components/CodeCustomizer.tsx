@@ -88,7 +88,7 @@ export default function CodeCustomizer({
                 setInput(e.target.value)
                 setError("")
               }}
-              onKeyDown={(e) => e.key === "Enter" && handleCustom()}
+              onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && handleCustom()}
             />
             <button
               className="us-btn text-xs px-4"

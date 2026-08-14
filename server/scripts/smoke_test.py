@@ -250,14 +250,18 @@ def run_all(client: TestClient) -> None:
     check("新生成的身份码为 6 位", bool(_re.fullmatch(r"[A-HJ-KM-NP-Z2-9]{6}", new_code)), new_code)
     acc6 = r.json()["account_id"]
 
-    # 自定义身份码：成功 / 格式非法 / 冲突（含大小写变体）
+    # 自定义身份码：任意字符原样存储（不再限定位数/字符集）；空与超长拒绝
     r = client.put(f"/api/accounts/{acc6}/recovery_code", json={"code": "km2pvq"})
-    check("自定义身份码成功（小写存为大写）",
-          r.status_code == 200 and r.json()["recovery_code"] == "KM2PVQ")
-    r = client.put(f"/api/accounts/{acc6}/recovery_code", json={"code": "ABC23"})
-    check("5 位身份码返回 400", r.status_code == 400)
-    r = client.put(f"/api/accounts/{acc6}/recovery_code", json={"code": "ABC2IO"})
-    check("含易混淆字符 I/O 返回 400", r.status_code == 400)
+    check("自定义身份码成功（原样存储，不再转大写）",
+          r.status_code == 200 and r.json()["recovery_code"] == "km2pvq")
+    r = client.put(f"/api/accounts/{acc6}/recovery_code", json={"code": "芝麻开门"})
+    check("汉字身份码成功", r.status_code == 200 and r.json()["recovery_code"] == "芝麻开门")
+    r = client.post("/api/accounts/claim", json={"recovery_code": "芝麻开门"})
+    check("汉字身份码可 claim", r.status_code == 200 and r.json()["account_id"] == acc6)
+    r = client.put(f"/api/accounts/{acc6}/recovery_code", json={"code": "   "})
+    check("空身份码返回 400", r.status_code == 400)
+    r = client.put(f"/api/accounts/{acc6}/recovery_code", json={"code": "长" * 65})
+    check("超长身份码返回 400", r.status_code == 400)
 
     # 制造另一个 account 占用 PW8HJT，再验证冲突
     r = client.post("/api/circles", json={"name": "占位圈", "nickname": "占位"})

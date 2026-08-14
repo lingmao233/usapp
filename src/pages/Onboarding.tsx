@@ -591,14 +591,22 @@ export default function Onboarding({
                     className="us-input"
                     placeholder="特定码（找圈主要）"
                     value={lookupCode}
-                    onChange={(e) => setLookupCode(e.target.value)}
+                    onChange={(e) => {
+                      setLookupCode(e.target.value)
+                      setLookupResults(null) // 改输入即清旧结果，避免"没找到"残留误导
+                    }}
                   />
                   <input
                     className="us-input"
                     placeholder="你在圈子里的名字"
                     value={lookupName}
-                    onChange={(e) => setLookupName(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && handleLookup()}
+                    onChange={(e) => {
+                      setLookupName(e.target.value)
+                      setLookupResults(null)
+                    }}
+                    onKeyDown={(e) =>
+                      e.key === "Enter" && !e.nativeEvent.isComposing && handleLookup()
+                    }
                   />
                   <button
                     className="us-btn-ghost border border-[#264653]/15"

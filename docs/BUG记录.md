@@ -134,3 +134,15 @@
 - **验证**：新增 stale 直返断言 + WISH_MATCH_PROMPT 指引断言；pytest 93/93；smoke 48 断言；`npm run build` + weapp tsc 通过；本机 `common_wishes_cache` 已清，下次访问按新 prompt 重算。真实 key 手测待用户确认"想暴富"建议变玩梗口吻。
 - **预防**：**同一用户感知区有多条生成路径时（方案 plan / 建议 suggestion），人格与护栏改造要逐路径排查**，不能假设只此一条；慢 LLM 调用一律不许堵在请求路径上（ stale-while-revalidate 或后台任务 + push）；外部 API 超时参数要显式可配。
 
+## BUG-009 找回面板：输入法回车选词误触发查询 + 旧结果残留
+
+- **日期**：2026-08-14
+- **环境**：本机 dev（前端交互缺陷，两端同在）
+- **现象**：按名字找回身份码时，输入名字后直接显示"没有找到叫这个名字的成员"，再点一次「查一下」又能正常出结果。
+- **根因**（两条叠加）：
+  1. 名字输入框的 `onKeyDown` 未做 IME 守卫——中文输入法**回车确认候选词**时 `keydown Enter` 已触发 `handleLookup`，拿半截拼音/未完成的词去查，返回空列表（`Onboarding.tsx`）。
+  2. 查询结果（含"没找到"空态）在输入变化时不清空，残留到下一次查询前，看起来就像"刚输入就说找不到"。
+- **修复**：`Onboarding.tsx` 两个找回输入框改值即 `setLookupResults(null)`；Enter 触发加 `!e.nativeEvent.isComposing` 守卫（`CodeCustomizer.tsx` 的 Enter 同病同药）。
+- **验证**：`npm run build` + `weapp npx tsc --noEmit` 通过；前端无测试基座，靠手测：中文输入法打字选词不再触发查询，改输入后"没找到"立即消失。
+- **预防**：**所有中文输入框的 Enter 快捷提交一律带 `isComposing` 守卫**；异步查询结果必须与输入联动失效（输入即清），否则必现"灵异空态"。
+
