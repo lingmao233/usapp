@@ -8,7 +8,9 @@ import numpy as np
 from ..config import settings
 from . import deepseek, doubao, mock
 from .prompts import (
+    DAILY_PLAN_PROMPT,
     DEFAULT_PERSONA,
+    FOOD_PROMPT,
     FRAGMENT_CLASSIFY_PROMPT,
     PAIR_SUMMARY_PROMPT,
     PERSONAS,
@@ -17,6 +19,8 @@ from .prompts import (
     PLAN_KIND_PERSONAS,
     PLAN_KINDS,
     PLAN_PROMPT,
+    RECEIPT_PROMPT,
+    SAVINGS_ADVICE_PROMPT,
     SUMMARY_PROMPT,
     USER_PROFILE_PROMPT,
     VENTING_NEGATIVE_PERSONA,
@@ -400,3 +404,83 @@ def generate_pair_summary(name_a: str, name_b: str, levels: dict, topics: list[s
         _state.used_mock = True
         logger.warning("DeepSeek 关系摘要失败，回退 mock：%s", exc)
         return mock.pair_summary(name_a, name_b, topics, wish_count)
+
+
+# ---------- 个人功能：账单识别 / 热量识别 / 当日计划 / 存款建议 ----------
+
+
+def recognize_receipt(image_path: str) -> list[dict] | None:
+    """小票/支付截图识别（一图多笔）：未配视觉模型返回 None 优雅跳过（配置使然，不算降级）；
+    调用失败回退 mock 桩并记 degraded。"""
+    if settings.embed_mock or not settings.DOUBAO_VISION_MODEL:
+        return None
+    try:
+        result = doubao.vision_json(image_path, RECEIPT_PROMPT)
+        if not isinstance(result, list):
+            raise ValueError(f"账单识别应返回数组，实际为 {type(result).__name__}")
+        return result
+    except Exception as exc:  # noqa: BLE001
+        _state.used_mock = True
+        logger.warning("豆包账单识别失败，回退 mock：%s", exc)
+        return mock.receipt_recognition()
+
+
+def recognize_food(image_path: str, hint: str = "") -> dict | None:
+    """食物照片识别 + 热量估算：开关与降级口径同 recognize_receipt。
+
+    hint 为用户补充描述（如"红烧肉一碗约 300g"），经 FOOD_PROMPT 的 {hint} 占位注入，可空。
+    """
+    if settings.embed_mock or not settings.DOUBAO_VISION_MODEL:
+        return None
+    try:
+        result = doubao.vision_json(image_path, FOOD_PROMPT.format(hint=hint))
+        if not isinstance(result, dict):
+            raise ValueError(f"食物识别应返回对象，实际为 {type(result).__name__}")
+        return result
+    except Exception as exc:  # noqa: BLE001
+        _state.used_mock = True
+        logger.warning("豆包食物识别失败，回退 mock：%s", exc)
+        return mock.food_recognition()
+
+
+def generate_daily_plan(goal_type: str, framework: dict, context: dict) -> list[dict]:
+    """当日计划：周期框架（规则算好的数字）+ 昨日完成 + 剩余进度 → 当日条目数组。
+
+    context 键：yesterday（昨日完成情况，一句话）、progress（剩余目标进度，一句话），均可空。
+    """
+    yesterday = str((context or {}).get("yesterday") or "")
+    progress = str((context or {}).get("progress") or "")
+    if settings.llm_mock:
+        return mock.daily_plan(goal_type, framework, yesterday, progress)
+    try:
+        prompt = DAILY_PLAN_PROMPT.format(
+            goal_type=goal_type,
+            framework=json.dumps(framework, ensure_ascii=False),
+            yesterday=yesterday or "（无记录）",
+            progress=progress or "（暂无）",
+        )
+        result = deepseek.chat_json(prompt)
+        # prompt 要求裸数组，但 json_object 模式下模型可能包一层对象，兼容取第一个数组值
+        items = result if isinstance(result, list) else next(
+            (v for v in result.values() if isinstance(v, list)), None
+        )
+        if items is None:
+            raise ValueError("当日计划返回中找不到条目数组")
+        return [item for item in items if isinstance(item, dict)]
+    except Exception as exc:  # noqa: BLE001
+        _state.used_mock = True
+        logger.warning("DeepSeek 当日计划失败，回退 mock：%s", exc)
+        return mock.daily_plan(goal_type, framework, yesterday, progress)
+
+
+def generate_savings_advice(settlement: dict) -> str:
+    """存款月度结算建议：数字全由规则算好，LLM 只说人话；失败回退 mock 模板文案。"""
+    if settings.llm_mock:
+        return mock.savings_advice(settlement)
+    try:
+        prompt = SAVINGS_ADVICE_PROMPT.format(settlement=json.dumps(settlement, ensure_ascii=False))
+        return deepseek.chat(prompt).strip()
+    except Exception as exc:  # noqa: BLE001
+        _state.used_mock = True
+        logger.warning("DeepSeek 存款建议失败，回退 mock：%s", exc)
+        return mock.savings_advice(settlement)

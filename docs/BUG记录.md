@@ -156,3 +156,17 @@
 - **验证**：`npm run build` + `weapp npx tsc --noEmit` 通过；手测：http://IP 访问下点复制正常入剪贴板。
 - **预防**：**剪贴板写入一律走 `src/lib/utils.ts` 的 `copyText`**（clipboard API + execCommand 双通道），禁止直接调 `navigator.clipboard`；新功能复用工具函数前先全局搜一遍现有实现。
 
+
+## BUG-011 Windows 本机 `npm run dev` 报 "'bash' 不是内部或外部命令"
+
+- **日期**：2026-08-17
+- **环境**：本机 dev（Windows，PowerShell）
+- **现象**：Windows 上 PowerShell 里 `npm run dev` 直接失败：`'bash' 不是内部或外部命令，也不是可运行的程序或批处理文件`，前后端都起不来。
+- **根因**（两条叠加）：
+  1. `package.json` 的 `dev` 脚本是 `bash scripts/dev.sh`；npm 在 Windows 上用 cmd 执行脚本，而本机 Git Bash 的 `bash.exe`（`C:\Program Files\Git\bin\bash.exe`）不在系统 PATH 里 → 命令解析失败。
+  2. 连带问题：`scripts/dev.sh` 的 venv 探测链只认 `.venv`（Windows 残留，本机不存在）和 `.venv-mac`（Mac 环境，Windows 上不可执行），不认识本机新建的 `server/.venv-win`——即使 bash 能跑也会报"找不到可用的 Python 虚拟环境"。
+- **修复**：
+  - `package.json`：`dev` 改为 `bash scripts/dev.sh || "C:/Program Files/Git/bin/bash.exe" scripts/dev.sh`——Mac/Linux 上 bash 在 PATH 直接成功走不到兜底；Windows cmd 上第一条失败后回退 Git Bash 全路径
+  - `scripts/dev.sh`：venv 探测链头部加 `.venv-win/Scripts/python.exe` 分支（Windows 本机环境优先），注释同步更新
+- **验证**：后台起 `npm run dev`，12 秒后 `curl http://127.0.0.1:8000/docs` 与 `http://127.0.0.1:7100/` 均 200；验证后已停掉任务避免占端口。
+- **预防**：跨平台 npm script 里的 shell 命令要有 Windows 兜底路径；新建 venv 目录后同步检查 `scripts/dev.sh` 探测链、`.gitignore`、AGENTS.md 三处（本次已补齐）。

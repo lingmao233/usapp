@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react"
+import { useNavigate } from "react-router"
 import { Heart, MessageCircle, Send } from "lucide-react"
 import {
   api,
   type Comment,
   type Fragment,
+  type Goal,
   type RelatedFragment,
   type Report,
   type ReportMeta,
@@ -42,6 +44,25 @@ const RELATED_COPY = [
   "巧了，TA 也在念叨这个",
   "这条可能会让你心头一动",
 ]
+
+const GOAL_TYPE_LABEL: Record<string, string> = {
+  weight_loss: "减肥",
+  savings: "存款",
+  study: "学习",
+  custom: "自定义",
+}
+
+/** 从 progress dict 提取百分比（键名宽松匹配；≤1 视为比例），没有则隐藏进度条 */
+function goalPercent(progress?: Record<string, unknown>): number | null {
+  if (!progress) return null
+  for (const k of ["percent", "progress_percent", "percentage", "rate"]) {
+    const v = progress[k]
+    if (typeof v === "number" && Number.isFinite(v)) {
+      return Math.max(0, Math.min(100, Math.round(v <= 1 ? v * 100 : v)))
+    }
+  }
+  return null
+}
 
 function RelatedCard({ items }: { items: RelatedFragment[] }) {
   return (
@@ -310,7 +331,9 @@ function ReportView({ reportId, onBack }: { reportId: string; onBack: () => void
 }
 
 export default function Wall({ session }: { session: Session }) {
+  const navigate = useNavigate()
   const [fragments, setFragments] = useState<Fragment[]>([])
+  const [buddyGoals, setBuddyGoals] = useState<Goal[]>([])
   const [relatedMap, setRelatedMap] = useState<Record<string, RelatedFragment[]>>({})
   const [draft, setDraft] = useState("")
   const [posting, setPosting] = useState(false)
@@ -400,6 +423,14 @@ export default function Wall({ session }: { session: Session }) {
       .catch(() => {})
   }, [session.circle_id])
 
+  // 「伙伴目标」：本圈内公开的目标（不含自己的；服务端已按可见性过滤），空则不渲染整块
+  useEffect(() => {
+    api
+      .circleGoals(session.circle_id, session.user_id)
+      .then((gs) => setBuddyGoals(gs.filter((g) => g.user_id !== session.user_id)))
+      .catch(() => {})
+  }, [session.circle_id, session.user_id])
+
   useEffect(() => {
     loadFragments()
     loadReports()
@@ -465,6 +496,45 @@ export default function Wall({ session }: { session: Session }) {
 
   return (
     <div className="max-w-2xl mx-auto px-5 py-8">
+      {/* 伙伴目标：圈内公开的目标，点击进 GoalDetail viewer 视角；空则不渲染 */}
+      {buddyGoals.length > 0 && (
+        <section className="mb-6">
+          <h3 className="us-serif text-lg mb-3">伙伴目标</h3>
+          <div className="flex flex-col gap-3">
+            {buddyGoals.map((g, i) => {
+              const percent = goalPercent(g.progress)
+              return (
+                <button
+                  key={g.id}
+                  className="us-rise us-panel rounded-2xl p-4 text-left"
+                  style={{ animationDelay: `${i * 70}ms` }}
+                  onClick={() => navigate(`/me/goals/${g.id}`)}
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium text-[#264653]">
+                      {g.user_nickname ?? g.owner_nickname ?? "圈友"}
+                    </span>
+                    <span className="us-chip">{GOAL_TYPE_LABEL[g.type] ?? "目标"}</span>
+                  </div>
+                  <p className="text-base mt-1 leading-relaxed">{g.title}</p>
+                  {percent !== null && (
+                    <div className="flex items-center gap-3 mt-2">
+                      <div className="flex-1 h-2 rounded-full bg-[#264653]/10 overflow-hidden">
+                        <div
+                          className="h-full rounded-full bg-[#F4A261]"
+                          style={{ width: `${percent}%` }}
+                        />
+                      </div>
+                      <span className="text-xs text-stone-500 shrink-0">{percent}%</span>
+                    </div>
+                  )}
+                </button>
+              )
+            })}
+          </div>
+        </section>
+      )}
+
       {/* 发布框 */}
       <div className="us-rise mb-2">
         <textarea

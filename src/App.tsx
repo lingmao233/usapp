@@ -33,12 +33,18 @@ import Wall from "@/pages/Wall"
 import Knowledge from "@/pages/Knowledge"
 import Wishes from "@/pages/Wishes"
 import Graph from "@/pages/Graph"
+import Me from "@/pages/Me"
+import GoalNew from "@/pages/GoalNew"
+import GoalDetail from "@/pages/GoalDetail"
+import Ledger from "@/pages/Ledger"
+import Calories from "@/pages/Calories"
 
 const TABS: { to: string; label: string }[] = [
   { to: "/wall", label: "碎片墙" },
   { to: "/knowledge", label: "知识库" },
   { to: "/wishes", label: "愿望清单" },
   { to: "/graph", label: "关系" },
+  { to: "/me", label: "我的" },
 ]
 
 /** 顶栏"我的身份码"弹出层 */
@@ -400,6 +406,11 @@ export default function App() {
           <Route path="/knowledge" element={<Knowledge session={session} />} />
           <Route path="/wishes" element={<Wishes session={session} />} />
           <Route path="/graph" element={<Graph session={session} />} />
+          <Route path="/me" element={<Me session={session} />} />
+          <Route path="/me/goals/new" element={<GoalNew session={session} />} />
+          <Route path="/me/goals/:id" element={<GoalDetail session={session} />} />
+          <Route path="/me/ledger" element={<Ledger session={session} />} />
+          <Route path="/me/calories" element={<Calories session={session} />} />
           <Route path="*" element={<Navigate to="/wall" replace />} />
         </Routes>
       </main>
