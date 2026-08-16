@@ -230,3 +230,64 @@ def pair_summary(name_a: str, name_b: str, topics: list[str], wish_count: int) -
     if not parts:
         return f"{name_a} 和 {name_b} 的交集还在路上，各自随手丢碎片，惊喜会自己长出来。"
     return f"{name_a} 和 {name_b} 很同频：" + "，".join(parts) + "。"
+
+
+def receipt_recognition() -> list[dict]:
+    """确定性账单识别桩：固定两笔账（餐饮 + 交通），schema 与 RECEIPT_PROMPT 对齐。"""
+    return [
+        {"amount": 35.5, "merchant": "麦当劳", "time": "2026-08-16 12:30", "category": "餐饮", "type": "expense"},
+        {"amount": 6.0, "merchant": "地铁", "time": "2026-08-16 09:05", "category": "交通", "type": "expense"},
+    ]
+
+
+def food_recognition() -> dict:
+    """确定性食物识别桩：固定一餐（米饭 + 番茄炒蛋），kcal 为该项总热量估算。"""
+    return {
+        "items": [
+            {"name": "米饭", "kcal": 232},
+            {"name": "番茄炒蛋", "kcal": 170},
+        ],
+        "note": "mock 模式固定估算结果，仅供参考",
+    }
+
+
+def daily_plan(goal_type: str, framework: dict | None = None,
+               yesterday: str = "", progress: str = "") -> list[dict]:
+    """确定性当日计划桩：按目标类型模板拼 2-3 条，框架里有数字就直接用。"""
+    framework = framework or {}
+    if goal_type == "weight_loss":
+        budget = framework.get("budget_kcal") or 1800
+        return [
+            {"content": f"今日摄入控制在 {budget} kcal 以内", "kind": "daily"},
+            {"content": "快走 30 分钟", "kind": "habit"},
+            {"content": "记录今日体重", "kind": "task"},
+        ]
+    if goal_type == "savings":
+        budget = framework.get("monthly_spendable_fen")
+        spend_line = f"今日花销记进账本（本月可花额度 {budget / 100:.0f} 元）" if budget else "今日花销记进账本"
+        return [
+            {"content": spend_line, "kind": "daily"},
+            {"content": "非必要不下单，想买先放购物车晾一天", "kind": "habit"},
+        ]
+    if goal_type == "study":
+        minutes = framework.get("daily_minutes") or 60
+        return [
+            {"content": f"专注学习 {minutes} 分钟", "kind": "daily"},
+            {"content": "回顾昨天学的内容，花 10 分钟过一遍", "kind": "habit"},
+        ]
+    return [
+        {"content": "把目标往前推一小步，做完打勾", "kind": "task"},
+        {"content": "睡前花两分钟复盘今天", "kind": "habit"},
+    ]
+
+
+def savings_advice(settlement: dict) -> str:
+    """确定性存款建议桩：f-string 模板把结算数字说成人话。"""
+    month = settlement.get("month") or "本月"
+    target = settlement.get("target_saved_fen", 0) / 100
+    actual = settlement.get("actual_saved_fen", 0) / 100
+    monthly = settlement.get("monthly_target_fen", 0) / 100
+    return (
+        f"（mock 建议）{month}计划存 {target:.0f} 元，实际存下 {actual:.0f} 元。"
+        f"按当前进度，接下来每月存 {monthly:.0f} 元就能如期达成，稳住节奏就好。"
+    )

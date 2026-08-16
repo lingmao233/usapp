@@ -1,7 +1,8 @@
 """冒烟测试：mock 模式下打 FastAPI 完整链路。
 
 链路：建圈子 → 两用户加入 → 各发碎片（含链接、含愿望）→ 断言分类/归档/愿望
-→ 相关碎片（跨用户）→ 语义搜索 → 共同愿望匹配 → 行动方案 → 周报 Markdown。
+→ 相关碎片（跨用户）→ 语义搜索 → 共同愿望匹配 → 行动方案 → 周报 Markdown
+→ 多圈子身份/恢复码 → 个人功能（目标 → 今日计划懒生成 → 打勾 → 记账/热量超预算联动 → 公开目标 → 鞭策限频）。
 
 运行：.venv/bin/python scripts/smoke_test.py
 """
@@ -17,6 +18,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.main import app  # noqa: E402
+
+# Windows GBK 控制台打不出 ✅/❌：强制 UTF-8 输出（不改编码直接崩 UnicodeEncodeError）
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout.reconfigure(encoding="utf-8")
 
 PASSED = 0
 
@@ -292,6 +297,63 @@ def run_all(client: TestClient) -> None:
     r = client.post("/api/accounts/claim", json={"recovery_code": "legacy88"})
     check("存量 8 位码仍可 claim（大小写不敏感）",
           r.status_code == 200 and r.json()["account_id"] == acc6)
+
+    # 13. 个人功能：目标 → 今日计划懒生成 → 打勾 → 记账/热量 → 超预算联动 → 鞭策
+    r = client.post("/api/goals", json={
+        "user_id": u1["user_id"], "type": "weight_loss", "title": "减掉小肚腩",
+        "params": {"target_weight_kg": 60, "days_left": 90},
+        "answers": {"sex": "male", "weight_kg": 70, "height_cm": 175, "age": 30, "activity": "sedentary"},
+        "visible_circle_ids": [cid], "detail_level": "summary"})
+    goal = r.json()
+    check("创建减肥目标（规则框架算预算）",
+          r.status_code == 200 and goal["framework"].get("budget_kcal", 0) > 0,
+          f"预算 {goal['framework'].get('budget_kcal')} kcal")
+    gid = goal["id"]
+
+    r = client.get("/api/plans/today", params={"user_id": u1["user_id"]})
+    check("今日计划首次拉取触发懒生成", r.json()["generating"] is True)
+    # TestClient 内联跑完 BackgroundTasks：重拉即收敛出 mock 条目
+    r = client.get("/api/plans/today", params={"user_id": u1["user_id"]})
+    plan = r.json()
+    ai_items = [i for i in plan["items"] if i["source"] == "ai"]
+    check("今日计划收敛出 AI 条目",
+          plan["generating"] is False and len(ai_items) >= 1,
+          ai_items[0]["content"] if ai_items else "无条目")
+
+    r = client.put(f"/api/plans/items/{ai_items[0]['id']}",
+                   json={"user_id": u1["user_id"], "done": True})
+    check("计划条目打勾", r.status_code == 200)
+    items = client.get("/api/plans/today", params={"user_id": u1["user_id"]}).json()["items"]
+    check("打勾状态落库", any(i["id"] == ai_items[0]["id"] and i["done"] for i in items))
+
+    r = client.post("/api/ledger/expenses", json={
+        "user_id": u1["user_id"], "amount_fen": 3550, "category": "餐饮", "merchant": "麦当劳"})
+    check("手动记账直接入账", r.status_code == 200 and r.json()["status"] == "confirmed")
+    month = plan["date"][:7]
+    bill = client.get("/api/ledger/expenses",
+                      params={"user_id": u1["user_id"], "month": month}).json()
+    check("月账单合计正确", bill["month_total_fen"] == 3550, f"当月 {len(bill['items'])} 笔")
+
+    r = client.post("/api/calories", json={"user_id": u1["user_id"], "total_kcal": 2000, "note": "放纵餐"})
+    adj = r.json().get("adjustment")
+    check("手动热量确认触发超预算联动", r.status_code == 200 and adj is not None,
+          f"超 {adj['over_kcal']} kcal" if adj else "未联动")
+    items = client.get("/api/plans/today", params={"user_id": u1["user_id"]}).json()["items"]
+    adjust_items = [i for i in items if i["source"] == "adjust"]
+    check("今日计划出现运动补偿 adjust 条目",
+          len(adjust_items) == 1 and "超预算" in adjust_items[0]["content"],
+          adjust_items[0]["content"][:40] if adjust_items else "无")
+
+    r = client.get(f"/api/goals/circle/{cid}", params={"viewer_id": u2["user_id"]})
+    pub = [g for g in r.json()["goals"] if g["id"] == gid]
+    check("圈内公开目标列表可见（summary 粒度）",
+          r.status_code == 200 and len(pub) == 1 and "params" not in pub[0],
+          pub[0]["title"] if pub else "未找到")
+
+    r = client.post(f"/api/goals/{gid}/nudges", json={"user_id": u2["user_id"], "message": "别喝奶茶了"})
+    check("圈友鞭策成功", r.status_code == 200 and r.json()["status"] == "sent")
+    r = client.post(f"/api/goals/{gid}/nudges", json={"user_id": u2["user_id"], "message": "再来"})
+    check("同日第二次鞭策 429 限频", r.status_code == 429)
 
     print(f"\n🎉 全部通过：{PASSED} 项断言")
 

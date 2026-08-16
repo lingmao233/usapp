@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "bash scripts/dev.sh",
+    "dev": "bash scripts/dev.sh || \"C:/Program Files/Git/bin/bash.exe\" scripts/dev.sh",
     "dev:web": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",

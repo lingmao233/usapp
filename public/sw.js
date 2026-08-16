@@ -1,7 +1,7 @@
 // 「我们」Service Worker（第 5 期，手写，不引 workbox）
 // 缓存策略：app shell 预缓存 + 静态资源 cache-first + /api/ 一律 network-only；
 // 推送：push 事件弹系统通知，点击 focus/打开对应页面。
-const CACHE_VERSION = "v1";
+const CACHE_VERSION = "v2";
 const CACHE_NAME = `us-app-${CACHE_VERSION}`;
 
 // 安装时预缓存的 app shell。SPA 路由由后端回退到 index.html（内容相同）；
@@ -12,6 +12,10 @@ const APP_SHELL = [
   "/knowledge",
   "/wishes",
   "/graph",
+  "/me",
+  "/me/goals/new",
+  "/me/ledger",
+  "/me/calories",
   "/manifest.webmanifest",
   "/icon-192.png",
   "/icon-512.png",

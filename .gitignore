@@ -38,6 +38,7 @@ server/data/*.db-wal
 # Python 虚拟环境与缓存
 server/.venv/
 server/.venv-mac/
+server/.venv-win/
 .pytest_cache/
 __pycache__/
 
@@ -48,4 +49,5 @@ weapp/.swc/
 # 其他工具会话产物
 .workbuddy/
 git教程 
+.kimi-code/
 

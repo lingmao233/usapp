@@ -5,6 +5,9 @@
 参考：https://docs.volcengine.com/docs/82379/1523520
 """
 import base64
+import json
+import os
+import re
 
 import numpy as np
 import httpx
@@ -72,3 +75,50 @@ def vision_caption(image_bytes: bytes, fmt: str = "jpeg") -> str:
     )
     resp.raise_for_status()
     return str(resp.json()["choices"][0]["message"]["content"]).strip()
+
+
+def vision_json(image_path: str, prompt: str) -> dict | list:
+    """视觉模型结构化识别：图片 + prompt（要求只输出 JSON），返回解析后的 JSON。
+
+    未配置视觉模型抛 RuntimeError；剥掉可能的 markdown ```json fence 后解析，
+    解析失败抛异常（让上层走降级）。
+    """
+    if not settings.DOUBAO_VISION_MODEL:
+        raise RuntimeError("未配置 DOUBAO_VISION_MODEL")
+    with open(image_path, "rb") as f:
+        image_bytes = f.read()
+    fmt = os.path.splitext(image_path)[1].lstrip(".").lower().replace("jpg", "jpeg") or "jpeg"
+    data_url = f"data:image/{fmt};base64,{base64.b64encode(image_bytes).decode()}"
+    url = f"{settings.DOUBAO_BASE_URL.rstrip('/')}/chat/completions"
+    payload = {
+        "model": settings.DOUBAO_VISION_MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ],
+    }
+    # 深度思考类模型（如 doubao-seed-evolving 默认 thinking=high）可压思考强度省 token；
+    # 未配置时不传该参，对不支持它的模型零风险
+    if settings.DOUBAO_VISION_REASONING:
+        payload["reasoning_effort"] = settings.DOUBAO_VISION_REASONING
+    resp = httpx.post(
+        url,
+        headers={"Authorization": f"Bearer {settings.DOUBAO_API_KEY}"},
+        json=payload,
+        timeout=30.0,
+    )
+    resp.raise_for_status()
+    text = str(resp.json()["choices"][0]["message"]["content"]).strip()
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"(\[.*\]|\{.*\})", text, re.DOTALL)
+        if match:
+            return json.loads(match.group(0))
+        raise

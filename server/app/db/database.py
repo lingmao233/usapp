@@ -199,6 +199,78 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     content TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+
+-- 个人功能（目标/计划/记账/热量/鞭策）：账号级数据，与圈子正交，可见性由服务端过滤
+CREATE TABLE IF NOT EXISTS goals (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    type TEXT NOT NULL,                           -- weight_loss/savings/study/custom
+    title TEXT NOT NULL,
+    params TEXT NOT NULL DEFAULT '{}',            -- 目标参数(目标体重/总额/截止日期等)
+    answers TEXT NOT NULL DEFAULT '{}',           -- 问卷答案
+    framework TEXT NOT NULL DEFAULT '{}',         -- 规则算出的周期框架(热量预算/月预算等)
+    status TEXT NOT NULL DEFAULT 'active',        -- active/done/abandoned
+    visible_circle_ids TEXT NOT NULL DEFAULT '[]',-- 空=私有
+    detail_level TEXT NOT NULL DEFAULT 'summary', -- summary/detail
+    nudge_enabled INTEGER NOT NULL DEFAULT 1,
+    last_settled_month TEXT NOT NULL DEFAULT '',  -- 存款滚雪球结算游标 'YYYY-MM'
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS plan_items (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    goal_id TEXT,                                 -- 可空=自定义条目
+    date TEXT NOT NULL,                           -- 'YYYY-MM-DD'
+    content TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'task',            -- habit/daily/task
+    source TEXT NOT NULL DEFAULT 'custom',        -- ai/custom/adjust
+    done INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS expenses (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    amount_fen INTEGER NOT NULL,                  -- 分；负数=收入
+    category TEXT NOT NULL,
+    merchant TEXT NOT NULL DEFAULT '',
+    note TEXT NOT NULL DEFAULT '',
+    spent_at TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'manual',        -- vision/manual
+    image_url TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'confirmed',     -- pending/confirmed
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS calorie_entries (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    total_kcal REAL NOT NULL,
+    items TEXT NOT NULL DEFAULT '[]',             -- 菜品明细 JSON
+    exercise_equiv TEXT NOT NULL DEFAULT '{}',    -- MET 换算结果
+    note TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT 'manual',
+    image_url TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'confirmed',     -- pending/confirmed
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS nudges (
+    id TEXT PRIMARY KEY,
+    goal_id TEXT NOT NULL,
+    from_user_id TEXT NOT NULL,
+    to_user_id TEXT NOT NULL,
+    message TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS nudge_blocks (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    blocked_user_id TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 
@@ -344,7 +416,7 @@ def _migrate_wishes_matched_status() -> None:
 def reset_db() -> None:
     """仅测试用：清空全部数据。"""
     conn = get_conn()
-    for table in ("chat_messages", "chat_threads", "common_wishes_cache", "pair_relationships", "user_profiles", "task_runs", "reports", "wishes", "comments", "likes", "push_subscriptions", "knowledge_items", "fragments", "memberships", "users", "circles", "accounts"):
+    for table in ("nudge_blocks", "nudges", "calorie_entries", "expenses", "plan_items", "goals", "chat_messages", "chat_threads", "common_wishes_cache", "pair_relationships", "user_profiles", "task_runs", "reports", "wishes", "comments", "likes", "push_subscriptions", "knowledge_items", "fragments", "memberships", "users", "circles", "accounts"):
         conn.execute(f"DELETE FROM {table}")
     conn.commit()
 

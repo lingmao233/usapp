@@ -6,8 +6,10 @@ set -e
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVER_DIR="$ROOT/server"
 # Windows venv 用 Scripts/python.exe，macOS/Linux 用 bin/python；
-# 若 .venv 是从 Windows 拷来的（bin/ 下没有 python），回退到 .venv-mac
-if [ "$OS" = "Windows_NT" ] && [ -x "$SERVER_DIR/.venv/Scripts/python.exe" ]; then
+# 优先 .venv-win（Windows 本机环境），其次 .venv，最后 .venv-mac
+if [ "$OS" = "Windows_NT" ] && [ -x "$SERVER_DIR/.venv-win/Scripts/python.exe" ]; then
+  VENV_PY="$SERVER_DIR/.venv-win/Scripts/python.exe"
+elif [ "$OS" = "Windows_NT" ] && [ -x "$SERVER_DIR/.venv/Scripts/python.exe" ]; then
   VENV_PY="$SERVER_DIR/.venv/Scripts/python.exe"
 elif [ -x "$SERVER_DIR/.venv/bin/python" ]; then
   VENV_PY="$SERVER_DIR/.venv/bin/python"

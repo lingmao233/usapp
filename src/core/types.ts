@@ -169,3 +169,122 @@ export interface PairGraph {
   nodes: GraphNode[]
   edges: GraphEdge[]
 }
+
+/* ---------------- 个人功能（账号级：目标/计划/记账/热量/鞭策） ---------------- */
+
+/** 目标：账号级一份，与圈子正交；visible_circle_ids 空=私有；viewer 过滤在服务端。
+ * params（目标参数）/answers（问卷答案）/framework（规则算出的周期框架）字段随类型而变，
+ * 统一按 Record 读取。 */
+export interface Goal {
+  id: string
+  user_id: string
+  type: "weight_loss" | "savings" | "study" | "custom"
+  title: string
+  params: Record<string, unknown>
+  answers: Record<string, unknown>
+  framework: Record<string, unknown>
+  status: string
+  visible_circle_ids: string[]
+  detail_level: "summary" | "detail"
+  nudge_enabled: boolean
+  created_at: string
+  /** 详情/圈内列表可能附带：进度摘要（服务端按 viewer 粒度裁剪后给） */
+  progress?: Record<string, unknown>
+  /** 圈内列表/viewer 视角的所有者昵称（服务端 SQL 别名 owner_nickname） */
+  user_nickname?: string
+  owner_nickname?: string
+  /** viewer 视角附带：当日是否已鞭策过 owner（前端据此置灰鞭策按钮） */
+  viewer_nudged_today?: boolean
+}
+
+/** 今日计划条目：goal_id 空=自定义条目；source=adjust 是联动追加的调整条目（前端醒目样式） */
+export interface PlanItem {
+  id: string
+  user_id?: string
+  goal_id?: string | null
+  date: string
+  content: string
+  kind: string
+  source: "ai" | "custom" | "adjust"
+  /** SQLite INTEGER 直出可能是 0/1，读取处用 Boolean() 归一 */
+  done: boolean | number
+  created_at?: string
+}
+
+/** 今日计划响应：generating 真值=后台懒生成中（语义照抄周报），前端 3s 轮询收敛 */
+export interface TodayPlan {
+  items: PlanItem[]
+  generating: boolean | string
+}
+
+/** 记账条目：金额一律 INTEGER 分，展示层换算元 */
+export interface Expense {
+  id: string
+  user_id?: string
+  amount_fen: number
+  category: string
+  merchant: string
+  note: string
+  spent_at: string
+  source?: string
+  image_url?: string
+  /** pending=待确认（识别结果），confirmed=已入账 */
+  status?: string
+  created_at?: string
+}
+
+/** 热量记录的菜品明细项 */
+export interface CalorieItem {
+  name: string
+  kcal: number
+  amount?: string
+}
+
+/** MET 运动等效：{running: {name: "跑步（8公里/小时）", met, minutes}, ...} */
+export interface ExerciseEquiv {
+  name: string
+  met?: number
+  minutes: number
+}
+
+/** 热量记录：exercise_equiv 为 MET 换算结果（运动 key → 等效分钟数） */
+export interface CalorieEntry {
+  id: string
+  user_id?: string
+  total_kcal: number
+  items: CalorieItem[]
+  exercise_equiv?: Record<string, ExerciseEquiv>
+  note: string
+  source?: string
+  image_url?: string
+  status?: string
+  created_at: string
+}
+
+/** 鞭策留言：内容仅目标 owner（与发送者）可见，其余圈友不可见 */
+export interface Nudge {
+  id: string
+  goal_id: string
+  from_user_id: string
+  to_user_id: string
+  message: string
+  created_at: string
+  from_nickname?: string
+}
+
+/** 月账单响应：只列已入账；monthly_spendable_fen 仅存在存款目标时给 */
+export interface LedgerMonth {
+  month: string
+  items: Expense[]
+  /** 月度支出合计（分，只算正数支出；收入记负数账） */
+  month_total_fen: number
+  monthly_spendable_fen?: number
+}
+
+/** 某日热量响应：budget_kcal 仅存在减肥目标时给 */
+export interface CalorieDay {
+  date: string
+  items: CalorieEntry[]
+  consumed_kcal: number
+  budget_kcal?: number
+}
