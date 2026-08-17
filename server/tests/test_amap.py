@@ -8,8 +8,10 @@ import tempfile
 
 # 独立测试数据库 + 强制 mock 模式（覆盖 .env 里可能存在的 key），必须在 import app 之前设置
 os.environ["DB_PATH"] = os.path.join(tempfile.mkdtemp(prefix="us_test_amap_"), "test.db")
-os.environ["DEEPSEEK_API_KEY"] = ""
-os.environ["DOUBAO_API_KEY"] = ""
+os.environ["LLM_API_KEY"] = ""
+os.environ["EMBEDDING_API_KEY"] = ""
+os.environ["VISION_API_KEY"] = ""
+os.environ["VISION_MODEL"] = ""
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app import ai  # noqa: E402
@@ -163,9 +165,9 @@ def test_build_plan_prompt_kind_strategy() -> None:
 
 def test_extract_plan_query_real_path_parsing(monkeypatch) -> None:
     """真实路径解析：kind/mood 小写化与枚举校验、字符串布尔防御、need 与 keywords 联动。"""
-    monkeypatch.setattr(settings, "DEEPSEEK_API_KEY", "x")  # llm_mock → False
+    monkeypatch.setattr(settings, "LLM_API_KEY", "x")  # llm_mock → False
     monkeypatch.setattr(
-        ai.deepseek, "chat_json",
+        ai.llm, "chat_json",
         lambda prompt: {"kind": "Venting", "mood": "NEGATIVE", "need_real_data": "false",
                         "keywords": "", "city": "", "scene": "丧"},
     )

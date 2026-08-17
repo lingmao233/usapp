@@ -1,4 +1,4 @@
-"""碎片发布后的异步管线：图片步骤（caption/图片向量）→ 分类 → embedding → 知识归档 → 愿望提取。"""
+"""碎片发布后的异步管线：图片步骤（caption）→ 分类 → embedding → 知识归档 → 愿望提取。"""
 import json
 import logging
 import re
@@ -47,24 +47,10 @@ def process_fragment(fragment_id: str) -> None:
     tasks.run_task("fragment_pipeline", fragment_id, lambda: _process(fragment_id))
 
 
-def _unit(vec: np.ndarray) -> np.ndarray:
-    n = np.linalg.norm(vec)
-    return vec / n if n > 0 else vec
-
-
-def fragment_embedding(content: str, image_url: str | None) -> np.ndarray:
-    """碎片向量（图片智能化）：图文双有 = 文字向量与图片向量均值 + 归一化（仍单列存储）；
-    纯图片只用图片向量（不再用占位词的文本向量）；纯文字维持文本向量。"""
-    img_vec = None
-    if image_url:
-        data, fmt = fragments.read_display_image(image_url)
-        if data:
-            img_vec = ai.embed_image(data, fmt)
-    if content and img_vec is not None:
-        return _unit(_unit(ai.embed_text(content)) + _unit(img_vec))
-    if img_vec is not None:
-        return _unit(img_vec)
-    return ai.embed_text(content or "[图片]")
+def fragment_embedding(content: str, caption: str = "") -> np.ndarray:
+    """碎片向量：统一走纯文本 embedding——带图碎片用「正文 + caption」拼接文本；
+    视觉关闭（无 caption）退回 正文 or "[图片]" 的占位逻辑。"""
+    return ai.embed_text(" ".join(p for p in (content, caption) if p) or "[图片]")
 
 
 def _process(fragment_id: str) -> None:
@@ -105,8 +91,8 @@ def _process(fragment_id: str) -> None:
         ),
     )
 
-    # 2. embedding（图文均值 / 纯图图片向量 / 纯文文本向量）
-    vec = fragment_embedding(content, image_url or None)
+    # 2. embedding（正文 + caption 拼接的纯文本向量；无 caption 退回占位词）
+    vec = fragment_embedding(content, caption)
     conn.execute(
         "UPDATE fragments SET embedding=? WHERE id=?",
         (encode_embedding(vec), fragment_id),

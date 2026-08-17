@@ -1,4 +1,4 @@
-"""DeepSeek API（OpenAI 兼容格式），httpx 直连 REST。"""
+"""文本 LLM（OpenAI 兼容 chat/completions），httpx 直连 REST。"""
 import json
 import logging
 import re
@@ -7,14 +7,14 @@ import httpx
 
 from ..config import settings
 
-logger = logging.getLogger("us.ai.deepseek")
+logger = logging.getLogger("us.ai.llm")
 
 
 def chat(prompt: str, json_mode: bool = False, timeout: float = 60.0) -> str:
-    """调用 deepseek-chat，返回文本内容。"""
-    url = f"{settings.DEEPSEEK_BASE_URL.rstrip('/')}/chat/completions"
+    """调用 LLM_MODEL，返回文本内容。"""
+    url = f"{settings.LLM_BASE_URL.rstrip('/')}/chat/completions"
     payload: dict = {
-        "model": settings.DEEPSEEK_MODEL,
+        "model": settings.LLM_MODEL,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.7,
     }
@@ -22,7 +22,7 @@ def chat(prompt: str, json_mode: bool = False, timeout: float = 60.0) -> str:
         payload["response_format"] = {"type": "json_object"}
     resp = httpx.post(
         url,
-        headers={"Authorization": f"Bearer {settings.DEEPSEEK_API_KEY}"},
+        headers={"Authorization": f"Bearer {settings.LLM_API_KEY}"},
         json=payload,
         timeout=timeout,
     )

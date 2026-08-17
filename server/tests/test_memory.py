@@ -11,15 +11,17 @@ import time
 
 # 独立测试数据库 + 强制 mock 模式（覆盖 .env 里可能存在的 key），必须在 import app 之前设置
 os.environ["DB_PATH"] = os.path.join(tempfile.mkdtemp(prefix="us_test_mem_"), "test.db")
-os.environ["DEEPSEEK_API_KEY"] = ""
-os.environ["DOUBAO_API_KEY"] = ""
+os.environ["LLM_API_KEY"] = ""
+os.environ["EMBEDDING_API_KEY"] = ""
+os.environ["VISION_API_KEY"] = ""
+os.environ["VISION_MODEL"] = ""
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app import ai  # noqa: E402
-from app.ai import deepseek, mock  # noqa: E402
+from app.ai import llm, mock  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.db.database import init_db  # noqa: E402
 from app.main import app  # noqa: E402
@@ -136,9 +138,9 @@ def test_task_runner_degraded_on_mock_fallback(monkeypatch) -> None:
     monkeypatch.setattr(type(ai.settings), "llm_mock", property(lambda self: False))
 
     def _boom(prompt: str) -> dict:
-        raise RuntimeError("模拟 DeepSeek 宕机")
+        raise RuntimeError("模拟 LLM 宕机")
 
-    monkeypatch.setattr(deepseek, "chat_json", _boom)
+    monkeypatch.setattr(llm, "chat_json", _boom)
 
     result: dict = {}
     status = tasks.run_task(

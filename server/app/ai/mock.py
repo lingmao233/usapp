@@ -50,20 +50,6 @@ def embed(text: str) -> np.ndarray:
     return vec
 
 
-def embed_image(data: bytes, fmt: str = "jpeg") -> np.ndarray:
-    """图片桩：字节分块哈希撒点，与文本向量同维度（EMBED_DIM），确定性。"""
-    vec = np.zeros(EMBED_DIM, dtype=np.float32)
-    if not data:
-        return vec
-    for i in range(0, len(data), 64):
-        idx = int.from_bytes(hashlib.md5(data[i : i + 64]).digest()[:4], "little") % EMBED_DIM
-        vec[idx] += 1.0
-    norm_len = np.linalg.norm(vec)
-    if norm_len > 0:
-        vec /= norm_len
-    return vec
-
-
 def _extract_tags(text: str) -> list[str]:
     """从高频 bigram 提取标签（去停用词，最多 3 个）。"""
     clean = _normalize(text)

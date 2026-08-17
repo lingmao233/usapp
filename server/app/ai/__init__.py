@@ -6,7 +6,7 @@ import threading
 import numpy as np
 
 from ..config import settings
-from . import deepseek, doubao, mock
+from . import embedding, llm, mock, vision
 from .prompts import (
     DAILY_PLAN_PROMPT,
     DEFAULT_PERSONA,
@@ -57,22 +57,22 @@ _DEFAULT_CLASSIFY = {
 
 
 def mode() -> dict:
-    return {"llm": "mock" if settings.llm_mock else "deepseek",
-            "embedding": "mock" if settings.embed_mock else "doubao"}
+    return {"llm": "mock" if settings.llm_mock else "real",
+            "embedding": "mock" if settings.embed_mock else "real"}
 
 
 def classify_fragment(content: str) -> dict:
     if settings.llm_mock:
         return mock.classify(content)
     try:
-        result = deepseek.chat_json(FRAGMENT_CLASSIFY_PROMPT.format(content=content))
+        result = llm.chat_json(FRAGMENT_CLASSIFY_PROMPT.format(content=content))
         merged = {**_DEFAULT_CLASSIFY, **{k: v for k, v in result.items() if k in _DEFAULT_CLASSIFY}}
         merged["wish_category"] = merged["wish_category"] or ""
         merged["tags"] = list(merged.get("tags") or [])[:3]
         return merged
     except Exception as exc:  # noqa: BLE001
         _state.used_mock = True
-        logger.warning("DeepSeek 分类失败，回退 mock：%s", exc)
+        logger.warning("LLM 分类失败，回退 mock：%s", exc)
         return mock.classify(content)
 
 
@@ -80,35 +80,23 @@ def embed_text(text: str) -> np.ndarray:
     if settings.embed_mock:
         return mock.embed(text)
     try:
-        return doubao.embed(text)
+        return embedding.embed(text)
     except Exception as exc:  # noqa: BLE001
         _state.used_mock = True
-        logger.warning("豆包 embedding 失败，回退 mock：%s", exc)
+        logger.warning("文本 embedding 失败，回退 mock：%s", exc)
         return mock.embed(text)
 
 
-def embed_image(image_bytes: bytes, fmt: str = "jpeg") -> np.ndarray:
-    """图片向量：与文本同一多模态端点（图文同空间同维度）；mock 用字节哈希桩。"""
-    if settings.embed_mock:
-        return mock.embed_image(image_bytes, fmt)
-    try:
-        return doubao.embed_image(image_bytes, fmt)
-    except Exception as exc:  # noqa: BLE001
-        _state.used_mock = True
-        logger.warning("豆包图片 embedding 失败，回退 mock：%s", exc)
-        return mock.embed_image(image_bytes, fmt)
-
-
 def image_caption(image_bytes: bytes, fmt: str = "jpeg") -> str:
-    """图片 caption：未配 key / 未配视觉模型（含 mock 模式）返回空跳过；
+    """图片 caption：视觉关闭（未配 key / 未配 VISION_MODEL，含 mock 模式）返回空跳过；
     调用失败同样优雅跳过（记 degraded，不影响任何现有功能）。"""
-    if settings.embed_mock or not settings.DOUBAO_VISION_MODEL:
+    if not settings.vision_enabled:
         return ""
     try:
-        return doubao.vision_caption(image_bytes, fmt)
+        return vision.vision_caption(image_bytes, fmt)
     except Exception as exc:  # noqa: BLE001
         _state.used_mock = True
-        logger.warning("豆包 vision caption 失败，跳过：%s", exc)
+        logger.warning("vision caption 失败，跳过：%s", exc)
         return ""
 
 
@@ -116,10 +104,10 @@ def summarize_text(text: str) -> str:
     if settings.llm_mock:
         return mock.summarize(text)
     try:
-        return deepseek.chat(SUMMARY_PROMPT.format(text=text[:4000])).strip()
+        return llm.chat(SUMMARY_PROMPT.format(text=text[:4000])).strip()
     except Exception as exc:  # noqa: BLE001
         _state.used_mock = True
-        logger.warning("DeepSeek 摘要失败，回退 mock：%s", exc)
+        logger.warning("LLM 摘要失败，回退 mock：%s", exc)
         return mock.summarize(text)
 
 
@@ -173,10 +161,10 @@ def generate_weekly_report(
         return mock.weekly_report(fragments_repr, week_start, week_end, stats)
     try:
         prompt = build_weekly_prompt(fragments_repr, week_start, week_end, persona, quotes, styles)
-        return deepseek.chat(prompt, timeout=120.0)
+        return llm.chat(prompt, timeout=120.0)
     except Exception as exc:  # noqa: BLE001
         _state.used_mock = True
-        logger.warning("DeepSeek 周报失败，回退 mock：%s", exc)
+        logger.warning("LLM 周报失败，回退 mock：%s", exc)
         return mock.weekly_report(fragments_repr, week_start, week_end, stats)
 
 
@@ -186,11 +174,11 @@ def confirm_common_wishes(wishes_repr: str) -> list[dict]:
         return []
     try:
         # 确认在后台重算里跑，放宽到 120s（默认 60s 曾 read timeout 回退相似度，BUG-008）
-        result = deepseek.chat_json(WISH_MATCH_PROMPT.format(wishes=wishes_repr), timeout=120.0)
+        result = llm.chat_json(WISH_MATCH_PROMPT.format(wishes=wishes_repr), timeout=120.0)
         return list(result.get("common_wishes", []))
     except Exception as exc:  # noqa: BLE001
         _state.used_mock = True
-        logger.warning("DeepSeek 愿望匹配失败，回退仅用相似度：%s", exc)
+        logger.warning("LLM 愿望匹配失败，回退仅用相似度：%s", exc)
         return []
 
 
@@ -208,7 +196,7 @@ def extract_plan_query(content: str) -> dict:
     if settings.llm_mock:
         return mock.extract_plan_query(content)
     try:
-        result = deepseek.chat_json(PLAN_EXTRACT_PROMPT.format(wish=content))
+        result = llm.chat_json(PLAN_EXTRACT_PROMPT.format(wish=content))
         need = result.get("need_real_data", True)
         if isinstance(need, str):  # 防御 LLM 把布尔写成字符串
             need = need.strip().lower() in ("true", "1", "是")
@@ -229,7 +217,7 @@ def extract_plan_query(content: str) -> dict:
         }
     except Exception as exc:  # noqa: BLE001
         _state.used_mock = True
-        logger.warning("DeepSeek 愿望分析失败，回退原文关键词：%s", exc)
+        logger.warning("LLM 愿望分析失败，回退原文关键词：%s", exc)
         return mock.extract_plan_query(content)
 
 
@@ -303,7 +291,7 @@ def generate_plan(
         return mock.generate_plan(content, users)
     try:
         prompt = build_plan_prompt(content, users, real_data, analysis)
-        result = deepseek.chat_json(prompt)
+        result = llm.chat_json(prompt)
         return {
             "time": result.get("time", ""),
             "location": result.get("location", ""),
@@ -314,7 +302,7 @@ def generate_plan(
         }
     except Exception as exc:  # noqa: BLE001
         _state.used_mock = True
-        logger.warning("DeepSeek 方案失败，回退 mock：%s", exc)
+        logger.warning("LLM 方案失败，回退 mock：%s", exc)
         return mock.generate_plan(content, users)
 
 
@@ -329,10 +317,10 @@ def generate_user_profile(nickname: str, stats: dict, excerpts: list[str] | None
             stats=json.dumps(stats, ensure_ascii=False),
             excerpts="\n".join(f"- {e}" for e in excerpts) or "（暂无公开发言摘录）",
         )
-        return dict(deepseek.chat_json(prompt))
+        return dict(llm.chat_json(prompt))
     except Exception as exc:  # noqa: BLE001
         _state.used_mock = True
-        logger.warning("DeepSeek 画像失败，回退 mock：%s", exc)
+        logger.warning("LLM 画像失败，回退 mock：%s", exc)
         return mock.user_profile(nickname, stats, excerpts)
 
 
@@ -380,10 +368,10 @@ def plan_chat(
         prompt = build_plan_chat_prompt(
             wish, participants, plan, quotes, history, message, viewer_profile, member_styles
         )
-        return deepseek.chat(prompt).strip()
+        return llm.chat(prompt).strip()
     except Exception as exc:  # noqa: BLE001
         _state.used_mock = True
-        logger.warning("DeepSeek 方案追问失败，回退 mock：%s", exc)
+        logger.warning("LLM 方案追问失败，回退 mock：%s", exc)
         return mock.plan_chat(wish, message)
 
 
@@ -399,10 +387,10 @@ def generate_pair_summary(name_a: str, name_b: str, levels: dict, topics: list[s
             wish_count=wish_count,
             levels=json.dumps(levels, ensure_ascii=False),
         )
-        return deepseek.chat(prompt).strip()
+        return llm.chat(prompt).strip()
     except Exception as exc:  # noqa: BLE001
         _state.used_mock = True
-        logger.warning("DeepSeek 关系摘要失败，回退 mock：%s", exc)
+        logger.warning("LLM 关系摘要失败，回退 mock：%s", exc)
         return mock.pair_summary(name_a, name_b, topics, wish_count)
 
 
@@ -410,18 +398,18 @@ def generate_pair_summary(name_a: str, name_b: str, levels: dict, topics: list[s
 
 
 def recognize_receipt(image_path: str) -> list[dict] | None:
-    """小票/支付截图识别（一图多笔）：未配视觉模型返回 None 优雅跳过（配置使然，不算降级）；
+    """小票/支付截图识别（一图多笔）：视觉关闭返回 None 优雅跳过（配置使然，不算降级）；
     调用失败回退 mock 桩并记 degraded。"""
-    if settings.embed_mock or not settings.DOUBAO_VISION_MODEL:
+    if not settings.vision_enabled:
         return None
     try:
-        result = doubao.vision_json(image_path, RECEIPT_PROMPT)
+        result = vision.vision_json(image_path, RECEIPT_PROMPT)
         if not isinstance(result, list):
             raise ValueError(f"账单识别应返回数组，实际为 {type(result).__name__}")
         return result
     except Exception as exc:  # noqa: BLE001
         _state.used_mock = True
-        logger.warning("豆包账单识别失败，回退 mock：%s", exc)
+        logger.warning("账单识别失败，回退 mock：%s", exc)
         return mock.receipt_recognition()
 
 
@@ -430,16 +418,16 @@ def recognize_food(image_path: str, hint: str = "") -> dict | None:
 
     hint 为用户补充描述（如"红烧肉一碗约 300g"），经 FOOD_PROMPT 的 {hint} 占位注入，可空。
     """
-    if settings.embed_mock or not settings.DOUBAO_VISION_MODEL:
+    if not settings.vision_enabled:
         return None
     try:
-        result = doubao.vision_json(image_path, FOOD_PROMPT.format(hint=hint))
+        result = vision.vision_json(image_path, FOOD_PROMPT.format(hint=hint))
         if not isinstance(result, dict):
             raise ValueError(f"食物识别应返回对象，实际为 {type(result).__name__}")
         return result
     except Exception as exc:  # noqa: BLE001
         _state.used_mock = True
-        logger.warning("豆包食物识别失败，回退 mock：%s", exc)
+        logger.warning("食物识别失败，回退 mock：%s", exc)
         return mock.food_recognition()
 
 
@@ -459,7 +447,7 @@ def generate_daily_plan(goal_type: str, framework: dict, context: dict) -> list[
             yesterday=yesterday or "（无记录）",
             progress=progress or "（暂无）",
         )
-        result = deepseek.chat_json(prompt)
+        result = llm.chat_json(prompt)
         # prompt 要求裸数组，但 json_object 模式下模型可能包一层对象，兼容取第一个数组值
         items = result if isinstance(result, list) else next(
             (v for v in result.values() if isinstance(v, list)), None
@@ -469,7 +457,7 @@ def generate_daily_plan(goal_type: str, framework: dict, context: dict) -> list[
         return [item for item in items if isinstance(item, dict)]
     except Exception as exc:  # noqa: BLE001
         _state.used_mock = True
-        logger.warning("DeepSeek 当日计划失败，回退 mock：%s", exc)
+        logger.warning("LLM 当日计划失败，回退 mock：%s", exc)
         return mock.daily_plan(goal_type, framework, yesterday, progress)
 
 
@@ -479,8 +467,8 @@ def generate_savings_advice(settlement: dict) -> str:
         return mock.savings_advice(settlement)
     try:
         prompt = SAVINGS_ADVICE_PROMPT.format(settlement=json.dumps(settlement, ensure_ascii=False))
-        return deepseek.chat(prompt).strip()
+        return llm.chat(prompt).strip()
     except Exception as exc:  # noqa: BLE001
         _state.used_mock = True
-        logger.warning("DeepSeek 存款建议失败，回退 mock：%s", exc)
+        logger.warning("LLM 存款建议失败，回退 mock：%s", exc)
         return mock.savings_advice(settlement)

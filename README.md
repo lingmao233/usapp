@@ -44,16 +44,17 @@ python3 -m venv .venv
 cp .env.example server/.env
 ```
 
-不填任何 key 直接跳过本步也能跑（mock 模式）。要接真实模型时填写：
+不填任何 key 直接跳过本步也能跑（mock 模式）。要接真实模型时填写（三组参数同厂商时只需填 `LLM_API_KEY`，其余 KEY/BASE_URL 自动回退）：
 
 | 变量 | 说明 |
 |------|------|
-| `DEEPSEEK_API_KEY` | DeepSeek API key，用于分类/摘要/周报/画像/方案 |
-| `DOUBAO_API_KEY` | 火山方舟 API key，用于文字+图片 embedding |
-| `DOUBAO_VISION_MODEL` | 可选；视觉模型名或接入点 ID，用于图片 caption，留空自动跳过 |
+| `LLM_API_KEY` | 文本 LLM（OpenAI 兼容 chat）API key，用于分类/摘要/周报/画像/方案 |
+| `LLM_BASE_URL` / `LLM_MODEL` | OpenAI 兼容端点与模型名（如阿里百炼 `https://dashscope.aliyuncs.com/compatible-mode/v1` + `qwen-plus`） |
+| `EMBEDDING_MODEL` | 文本向量模型名（如 `text-embedding-v4`）；`EMBEDDING_API_KEY`/`EMBEDDING_BASE_URL` 留空回退 LLM 组 |
+| `VISION_MODEL` | 可选；视觉模型名（如 `qwen-vl-max-latest`），用于图片 caption/账单/食物识别，留空自动跳过 |
 | `REDIS_URL` | 可选；连不上时降级为进程内字典并打 warning |
 
-base URL 与模型名均有默认值，按需覆盖，详见 `.env.example`。
+base URL 与模型名均有回退与默认值，按需覆盖，详见 `.env.example`。
 
 ### 3. 启动
 

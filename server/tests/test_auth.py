@@ -10,8 +10,10 @@ import tempfile
 
 # 独立测试数据库 + 强制 mock 模式（覆盖 .env 里可能存在的 key），必须在 import app 之前设置
 os.environ["DB_PATH"] = os.path.join(tempfile.mkdtemp(prefix="us_test_auth_"), "test.db")
-os.environ["DEEPSEEK_API_KEY"] = ""
-os.environ["DOUBAO_API_KEY"] = ""
+os.environ["LLM_API_KEY"] = ""
+os.environ["EMBEDDING_API_KEY"] = ""
+os.environ["VISION_API_KEY"] = ""
+os.environ["VISION_MODEL"] = ""
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest  # noqa: E402

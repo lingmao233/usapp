@@ -13,22 +13,26 @@ for _p in (_SERVER_DIR / ".env", _ROOT_DIR / ".env"):
 
 
 class Settings:
-    # DeepSeek（OpenAI 兼容）
-    DEEPSEEK_API_KEY: str = os.getenv("DEEPSEEK_API_KEY", "")
-    DEEPSEEK_BASE_URL: str = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-    DEEPSEEK_MODEL: str = os.getenv("DEEPSEEK_MODEL", "")
+    # 文本 LLM（OpenAI 兼容 chat/completions）：分类/摘要/周报/方案/画像
+    LLM_API_KEY: str = os.getenv("LLM_API_KEY", "")
+    LLM_BASE_URL: str = os.getenv("LLM_BASE_URL", "")
+    LLM_MODEL: str = os.getenv("LLM_MODEL", "")
 
-    # 豆包 Embedding（火山方舟 OpenAI 兼容）
-    DOUBAO_API_KEY: str = os.getenv("DOUBAO_API_KEY", "")
-    DOUBAO_BASE_URL: str = os.getenv("DOUBAO_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")
-    DOUBAO_EMBEDDING_MODEL: str = os.getenv("DOUBAO_EMBEDDING_MODEL", "doubao-embedding-vision")
-    # 多模态向量维度：文字与图片调用显式传同一值，保证同空间同维度。
-    # 默认 1024：doubao-embedding-vision 实测支持的最小档（512 会被 400 拒绝）
-    DOUBAO_EMBED_DIM: int = int(os.getenv("DOUBAO_EMBED_DIM", "1024"))
-    # 视觉模型（图片 caption）：默认空 = 关闭，未配置或调用失败都优雅跳过
-    DOUBAO_VISION_MODEL: str = os.getenv("DOUBAO_VISION_MODEL", "")
-    # caption 调用的思考强度（minimal/low/medium/high），空 = 不传参；seed 类模型建议 minimal
-    DOUBAO_VISION_REASONING: str = os.getenv("DOUBAO_VISION_REASONING", "")
+    # Embedding（OpenAI 兼容 /embeddings，纯文本向量）
+    # KEY/BASE_URL 留空时回退 LLM 组：同厂商只需配 LLM_API_KEY
+    EMBEDDING_API_KEY: str = os.getenv("EMBEDDING_API_KEY", "") or LLM_API_KEY
+    EMBEDDING_BASE_URL: str = os.getenv("EMBEDDING_BASE_URL", "") or LLM_BASE_URL
+    EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "")
+    # 向量维度：调用时显式传，保证全库同维度（换模型/改维度后必须跑 scripts/reembed.py 回填）
+    EMBEDDING_DIM: int = int(os.getenv("EMBEDDING_DIM", "1024"))
+
+    # 视觉模型（图片 caption / 账单识别 / 食物识别）：VISION_MODEL 空 = 视觉关闭，优雅跳过
+    # KEY/BASE_URL 同样回退 LLM 组
+    VISION_API_KEY: str = os.getenv("VISION_API_KEY", "") or LLM_API_KEY
+    VISION_BASE_URL: str = os.getenv("VISION_BASE_URL", "") or LLM_BASE_URL
+    VISION_MODEL: str = os.getenv("VISION_MODEL", "")
+    # caption/识别调用的思考强度（minimal/low/medium/high），空 = 不传参；深度思考类模型建议 minimal
+    VISION_REASONING: str = os.getenv("VISION_REASONING", "")
 
     # 高德 Web 服务（方案真实数据：POI/天气/通勤）：空 = 回退纯 LLM 经验方案
     AMAP_KEY: str = os.getenv("AMAP_KEY", "")
@@ -46,11 +50,16 @@ class Settings:
 
     @property
     def llm_mock(self) -> bool:
-        return not self.DEEPSEEK_API_KEY
+        return not self.LLM_API_KEY
 
     @property
     def embed_mock(self) -> bool:
-        return not self.DOUBAO_API_KEY
+        return not self.EMBEDDING_API_KEY
+
+    @property
+    def vision_enabled(self) -> bool:
+        """视觉开关：配了 key（含 LLM 回退）且配了 VISION_MODEL 才启用。"""
+        return bool(self.VISION_API_KEY and self.VISION_MODEL)
 
     @property
     def upload_dir(self) -> Path:
