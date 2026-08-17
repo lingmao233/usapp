@@ -44,11 +44,6 @@ class Settings:
     # Web Push（第 5 期）：VAPID claims 的联系方式，规范要求 mailto: 或 https:
     VAPID_SUB: str = os.getenv("VAPID_SUB", "mailto:us-app@localhost")
 
-    # 身份码找回的特定码（多个用英文逗号分隔，汉字/字母均可；空 = 找回功能关闭）
-    RECOVERY_ACCESS_CODES: tuple[str, ...] = tuple(
-        c.strip() for c in os.getenv("RECOVERY_ACCESS_CODES", "").split(",") if c.strip()
-    )
-
     @property
     def llm_mock(self) -> bool:
         return not self.DEEPSEEK_API_KEY

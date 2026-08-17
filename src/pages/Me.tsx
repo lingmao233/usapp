@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react"
 import { Link, useNavigate } from "react-router"
-import { api, type Goal, type PlanItem, type Session } from "@/lib/api"
+import { api, type Goal, type PlanItem } from "@/lib/api"
 
 const GOAL_TYPE_LABEL: Record<string, string> = {
   weight_loss: "减肥",
@@ -47,7 +47,7 @@ function GoalSummary({ goal }: { goal: Goal }) {
   )
 }
 
-export default function Me({ session }: { session: Session }) {
+export default function Me({ accountId }: { accountId: string }) {
   const navigate = useNavigate()
   const [items, setItems] = useState<PlanItem[]>([])
   const [generating, setGenerating] = useState(false)
@@ -60,14 +60,14 @@ export default function Me({ session }: { session: Session }) {
   // 单次拉今日计划；generating 真值=后台懒生成中
   const refreshToday = useCallback(async () => {
     try {
-      const res = await api.todayPlan(session.user_id)
+      const res = await api.todayPlan(accountId)
       setItems(res.items)
       setGenerating(Boolean(res.generating))
       return Boolean(res.generating)
     } catch {
       return false /* 静默，保持现状 */
     }
-  }, [session.user_id])
+  }, [accountId])
 
   // 首载：今日计划带 generating 轮询（3s 间隔，90s deadline 收敛，照抄 Wishes 模式）
   useEffect(() => {
@@ -89,15 +89,15 @@ export default function Me({ session }: { session: Session }) {
   // 目标列表独立成败，不拖垮今日计划
   useEffect(() => {
     api
-      .listGoals(session.user_id)
+      .listGoals(accountId)
       .then(setGoals)
       .catch(() => {})
-  }, [session.user_id])
+  }, [accountId])
 
   async function handleToggle(item: PlanItem) {
     const done = !item.done
     try {
-      await api.updatePlanItem(item.id, session.user_id, { done })
+      await api.updatePlanItem(item.id, accountId, { done })
       setItems((xs) => xs.map((x) => (x.id === item.id ? { ...x, done } : x)))
     } catch {
       /* 失败保持现状，用户可重试 */
@@ -106,7 +106,7 @@ export default function Me({ session }: { session: Session }) {
 
   async function handleDelete(item: PlanItem) {
     try {
-      await api.deletePlanItem(item.id, session.user_id)
+      await api.deletePlanItem(item.id, accountId)
       setItems((xs) => xs.filter((x) => x.id !== item.id))
     } catch {
       /* 失败保持现状，用户可重试 */
@@ -119,7 +119,7 @@ export default function Me({ session }: { session: Session }) {
     setAdding(true)
     setSubmitError("")
     try {
-      await api.addPlanItem(session.user_id, content)
+      await api.addPlanItem(accountId, content)
       setDraft("")
       await refreshToday()
     } catch {
@@ -248,9 +248,6 @@ export default function Me({ session }: { session: Session }) {
                 <div className="flex items-center gap-2">
                   <span className="us-chip shrink-0">{GOAL_TYPE_LABEL[g.type] ?? "目标"}</span>
                   <span className="text-base font-medium leading-relaxed">{g.title}</span>
-                  {g.visible_circle_ids.length > 0 && (
-                    <span className="text-xs text-stone-400 ml-auto shrink-0">已公开</span>
-                  )}
                 </div>
                 <GoalSummary goal={g} />
               </button>

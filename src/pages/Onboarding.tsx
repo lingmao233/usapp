@@ -1,36 +1,24 @@
-import { useEffect, useState } from "react"
+import { useState } from "react"
 import {
   api,
   loadAccountId,
+  saveAccount,
   saveAccountId,
-  saveSession,
-  clearAccountId,
-  type AccountCircle,
-  type Session,
+  type AccountInfo,
 } from "@/lib/api"
 import CodeCustomizer from "@/components/CodeCustomizer"
-import { DEFAULT_PERSONA_KEY, PERSONA_PRESETS } from "@/lib/persona"
 import { copyText } from "@/lib/utils"
 
-function activeLabel(c: AccountCircle): string {
-  if (c.fragment_count === 0) return "还没有碎片，等你来丢第一条"
-  if (!c.last_active) return `${c.fragment_count} 条碎片`
-  const diff = Date.now() - new Date(c.last_active).getTime()
-  if (diff < 3_600_000) return "刚刚有人丢碎片"
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前活跃`
-  return `${Math.floor(diff / 86_400_000)} 天前活跃`
-}
-
-/** 恢复码醒目展示卡：新建身份后必看，支持当场自定义 */
+/** 找回凭证醒目展示卡：注册/找回成功后必看，可当场自设，点「我已保存」才放行 */
 function RecoveryCard({ code, onContinue }: { code: string; onContinue: () => void }) {
   const [currentCode, setCurrentCode] = useState(code)
   const [copied, setCopied] = useState(false)
   const accountId = loadAccountId()
   return (
     <div className="us-rise us-panel rounded-2xl p-6 text-center">
-      <p className="us-serif text-xl mb-1">你的身份恢复码</p>
+      <p className="us-serif text-xl mb-1">你的找回凭证</p>
       <p className="text-xs text-stone-500 mb-5">
-        换个设备就靠它找回你的圈子，截图存好
+        忘了密码就靠它重置，只此一次展示，截图或抄写存好
       </p>
       <p className="us-serif text-3xl sm:text-4xl tracking-[0.35em] text-[#264653] mb-5 select-all">
         {currentCode}
@@ -40,10 +28,10 @@ function RecoveryCard({ code, onContinue }: { code: string; onContinue: () => vo
           className="us-btn"
           onClick={async () => setCopied(await copyText(currentCode))}
         >
-          {copied ? "已复制 ✓" : "复制恢复码"}
+          {copied ? "已复制 ✓" : "复制凭证"}
         </button>
         <button className="us-btn-ghost border border-[#264653]/20" onClick={onContinue}>
-          存好了，进圈子 →
+          我已保存，继续 →
         </button>
       </div>
       {accountId && (
@@ -60,189 +48,41 @@ function RecoveryCard({ code, onContinue }: { code: string; onContinue: () => vo
   )
 }
 
-/** 建圈成功卡：邀请码常驻展示，复制或确认后才进圈（不再自动跳转） */
-function InviteCard({ code, onContinue }: { code: string; onContinue: () => void }) {
-  const [copied, setCopied] = useState(false)
-  return (
-    <div className="us-rise us-panel rounded-2xl p-6 text-center">
-      <p className="us-serif text-xl mb-1">圈子建好啦</p>
-      <p className="text-xs text-stone-500 mb-5">邀请码发给朋友，他们凭码加入</p>
-      <p className="us-serif text-3xl sm:text-4xl tracking-[0.35em] text-[#264653] mb-5 select-all">
-        {code}
-      </p>
-      <div className="flex justify-center gap-3">
-        <button className="us-btn" onClick={async () => setCopied(await copyText(code))}>
-          {copied ? "已复制 ✓" : "复制邀请码"}
-        </button>
-        <button className="us-btn-ghost border border-[#264653]/20" onClick={onContinue}>
-          进圈子 →
-        </button>
-      </div>
-    </div>
-  )
-}
-
-export default function Onboarding({
-  onDone,
-  onCancel,
-}: {
-  onDone: (s: Session) => void
-  onCancel?: () => void
-}) {
-  const [accountId, setAccountId] = useState<string | null>(() => loadAccountId())
-  const [accountNickname, setAccountNickname] = useState("")
-  const [myCircles, setMyCircles] = useState<AccountCircle[] | null>(null)
-
-  const [mode, setMode] = useState<"choose" | "create" | "join" | "claim">("choose")
-  const [circleName, setCircleName] = useState("")
-  const [inviteCode, setInviteCode] = useState("")
+/** 账号登录/注册入口：账号名全局唯一 + 可选密码；忘记密码走找回凭证重置 */
+export default function Onboarding({ onDone }: { onDone: (a: AccountInfo) => void }) {
+  const [mode, setMode] = useState<"login" | "register" | "reset">("login")
+  const [username, setUsername] = useState("")
+  const [password, setPassword] = useState("")
   const [nickname, setNickname] = useState("")
   const [recoveryInput, setRecoveryInput] = useState("")
+  const [newPassword, setNewPassword] = useState("")
   const [error, setError] = useState("")
-  const [nickError, setNickError] = useState("")
   const [busy, setBusy] = useState(false)
-  // 圈子人格：五个预设 chips + 可展开的自定义输入
-  const [personaPreset, setPersonaPreset] = useState(DEFAULT_PERSONA_KEY)
-  const [personaCustomOpen, setPersonaCustomOpen] = useState(false)
-  const [personaCustom, setPersonaCustom] = useState("")
-  const [createdCode, setCreatedCode] = useState<string | null>(null)
-  const [createdSession, setCreatedSession] = useState<Session | null>(null)
-  const [recoveryShow, setRecoveryShow] = useState<{ code: string; session: Session } | null>(null)
-  // 按名字找回身份码（特定码门）
-  const [lookupOpen, setLookupOpen] = useState(false)
-  const [lookupCode, setLookupCode] = useState("")
-  const [lookupName, setLookupName] = useState("")
-  const [lookupResults, setLookupResults] = useState<
-    { circle_name: string; nickname: string; recovery_code: string }[] | null
-  >(null)
-  const [copiedIdx, setCopiedIdx] = useState<number | null>(null)
+  const [forced, setForced] = useState<{ code: string; account: AccountInfo } | null>(null)
 
-  // 有身份就拉"我的圈子"列表
-  useEffect(() => {
-    if (!accountId) {
-      setMyCircles([])
-      return
-    }
-    api
-      .accountCircles(accountId)
-      .then((res) => {
-        setMyCircles(res.circles)
-        setAccountNickname(res.account_nickname)
-        setNickname((n) => n || res.account_nickname)
-      })
-      .catch(() => {
-        clearAccountId()
-        setAccountId(null)
-        setMyCircles([])
-      })
-  }, [accountId])
-
-  function enterCircle(c: AccountCircle) {
-    const session: Session = {
-      circle_id: c.circle_id,
-      user_id: c.user_id,
-      nickname: c.my_nickname,
-      circle_name: c.circle_name,
-      invite_code: c.invite_code,
-    }
-    saveSession(session)
-    onDone(session)
+  /** 登录态落盘（recovery_code 是一次性的，不持久化） */
+  function persist(a: AccountInfo) {
+    saveAccountId(a.account_id)
+    saveAccount({
+      account_id: a.account_id,
+      username: a.username,
+      nickname: a.nickname,
+      has_password: a.has_password,
+    })
   }
 
-  /** 新身份先亮恢复码，否则直接进 */
-  function afterAuth(recoveryCode: string | null | undefined, session: Session) {
-    if (recoveryCode) {
-      setRecoveryShow({ code: recoveryCode, session })
-    } else {
-      onDone(session)
-    }
+  /** 注册/找回响应带找回凭证：强制展示一次，确认后才进 App */
+  function afterAuth(a: AccountInfo) {
+    persist(a)
+    if (a.recovery_code) setForced({ code: a.recovery_code, account: a })
+    else onDone(a)
   }
 
-  function handle409(e: unknown): boolean {
-    if (e instanceof Error && e.message.includes("已经有人在用")) {
-      setNickError(e.message)
-      return true
-    }
-    return false
-  }
-
-  async function handleCreate() {
-    if (!circleName.trim()) {
-      setError("给圈子起个名字吧")
-      return
-    }
-    setBusy(true)
-    setError("")
-    setNickError("")
-    try {
-      const custom = personaCustomOpen ? personaCustom.trim() : ""
-      const circle = await api.createCircle(circleName.trim(), accountId, nickname.trim() || undefined, {
-        persona_preset: personaPreset,
-        persona_custom: custom,
-      })
-      if (circle.account_id) saveAccountId(circle.account_id)
-      const session: Session = {
-        circle_id: circle.id,
-        user_id: circle.user_id,
-        nickname: circle.nickname,
-        circle_name: circle.name,
-        invite_code: circle.invite_code,
-      }
-      saveSession(session)
-      // 邀请码常驻成功卡，用户确认后才进圈（不再 1.2s 自动跳转）
-      setCreatedSession(session)
-      setCreatedCode(circle.invite_code)
-      if (circle.recovery_code) {
-        // 新身份：先看恢复码，再看邀请码
-        setRecoveryShow({ code: circle.recovery_code, session })
-      }
-    } catch (e) {
-      if (!handle409(e)) setError(e instanceof Error ? e.message : "出了点问题，再试一次")
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function handleJoin() {
-    if (!inviteCode.trim()) {
-      setError("填一下邀请码")
-      return
-    }
-    setBusy(true)
-    setError("")
-    setNickError("")
-    try {
-      const res = await api.joinCircle(inviteCode.trim(), nickname.trim() || undefined, accountId)
-      if (res.account_id) saveAccountId(res.account_id)
-      const session: Session = {
-        circle_id: res.circle_id,
-        user_id: res.user_id,
-        nickname: res.nickname,
-        circle_name: res.circle_name,
-        invite_code: res.invite_code,
-      }
-      saveSession(session)
-      afterAuth(res.recovery_code, session)
-    } catch (e) {
-      if (!handle409(e)) setError(e instanceof Error ? e.message : "出了点问题，再试一次")
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function handleClaim() {
-    if (!recoveryInput.trim()) {
-      setError("填一下身份码")
-      return
-    }
+  async function run(fn: () => Promise<void>) {
     setBusy(true)
     setError("")
     try {
-      const res = await api.claimAccount(recoveryInput.trim())
-      saveAccountId(res.account_id)
-      setAccountId(res.account_id)
-      setMode("choose")
-      setRecoveryInput("")
+      await fn()
     } catch (e) {
       setError(e instanceof Error ? e.message : "出了点问题，再试一次")
     } finally {
@@ -250,158 +90,45 @@ export default function Onboarding({
     }
   }
 
-  /** 按名字找回身份码：特定码 + 圈内昵称 → 列表展示，一键复制 */
-  async function handleLookup() {
-    if (!lookupCode.trim() || !lookupName.trim()) {
-      setError("特定码和名字都要填")
-      return
-    }
-    setBusy(true)
-    setError("")
-    try {
-      const res = await api.recoverLookup(lookupCode.trim(), lookupName.trim())
-      setLookupResults(res.results)
-    } catch (e) {
-      setLookupResults(null)
-      setError(e instanceof Error ? e.message : "出了点问题，再试一次")
-    } finally {
-      setBusy(false)
-    }
-  }
+  const handleLogin = () =>
+    run(async () => {
+      if (!username.trim()) {
+        setError("填一下账号名")
+        return
+      }
+      afterAuth(await api.login(username.trim(), password))
+    })
 
-  async function copyLookupCode(code: string, idx: number) {
-    if (await copyText(code)) {
-      setCopiedIdx(idx)
-      setTimeout(() => setCopiedIdx(null), 1500)
-    } else {
-      setError("复制失败，长按身份码手动复制")
-    }
-  }
+  const handleRegister = () =>
+    run(async () => {
+      if (!username.trim()) {
+        setError("给账号起个名字吧")
+        return
+      }
+      afterAuth(await api.register(username.trim(), password, nickname.trim() || undefined))
+    })
 
-  const hasCircles = accountId !== null && (myCircles?.length ?? 0) > 0
+  const handleReset = () =>
+    run(async () => {
+      if (!username.trim() || !recoveryInput.trim()) {
+        setError("账号名和找回凭证都要填")
+        return
+      }
+      // new_password 原样传：空串 = 清空成无密码账号
+      afterAuth(await api.reset(username.trim(), recoveryInput.trim(), newPassword))
+    })
 
-  const nicknameField = (
-    <div>
-      <label className="text-xs text-stone-500">你的昵称</label>
-      <input
-        className="us-input"
-        placeholder="朋友们怎么叫你"
-        value={nickname}
-        onChange={(e) => {
-          setNickname(e.target.value)
-          setNickError("")
-        }}
-      />
-      {nickError && <p className="text-xs text-red-700 mt-1.5">{nickError}</p>}
-    </div>
-  )
-
-  // 人格选择：五个预设 chips + 展开"自定义"输入框（自定义非空时优先于预设）
-  const personaField = (
-    <div>
-      <label className="text-xs text-stone-500">圈子人格（周报的口吻）</label>
-      <div className="flex flex-wrap gap-2 mt-1.5">
-        {PERSONA_PRESETS.map((p) => (
-          <button
-            key={p.key}
-            type="button"
-            title={p.desc}
-            onClick={() => setPersonaPreset(p.key)}
-            className={`rounded-full px-3.5 py-1.5 text-sm transition-colors duration-200 ${
-              personaPreset === p.key && !personaCustomOpen
-                ? "bg-[#161616] text-white"
-                : "text-[#264653] border border-[#264653]/20 hover:bg-[#264653]/8"
-            }`}
-          >
-            {p.label}
-          </button>
-        ))}
-        <button
-          type="button"
-          onClick={() => setPersonaCustomOpen((v) => !v)}
-          className={`rounded-full px-3.5 py-1.5 text-sm transition-colors duration-200 ${
-            personaCustomOpen
-              ? "bg-[#161616] text-white"
-              : "text-[#264653] border border-dashed border-[#264653]/20 hover:bg-[#264653]/8"
-          }`}
-        >
-          自定义…
-        </button>
-      </div>
-      {personaCustomOpen && (
-        <input
-          className="us-input mt-2"
-          placeholder="比如：像佟掌柜一样，精明又热乎"
-          value={personaCustom}
-          onChange={(e) => setPersonaCustom(e.target.value)}
-        />
-      )}
-    </div>
-  )
-
-  // ---------- 创建/加入表单 ----------
-  const createForm = (
-    <div className="flex flex-col gap-5">
-      <div>
-        <label className="text-xs text-stone-500">圈子名字</label>
-        <input
-          className="us-input"
-          placeholder="比如：周末小队"
-          value={circleName}
-          onChange={(e) => setCircleName(e.target.value)}
-        />
-      </div>
-      {nicknameField}
-      {personaField}
-      <button className="us-btn" disabled={busy} onClick={handleCreate}>
-        {busy ? "创建中…" : "创建圈子"}
-      </button>
-    </div>
-  )
-
-  const joinForm = (
-    <div className="flex flex-col gap-5">
-      <div>
-        <label className="text-xs text-stone-500">邀请码</label>
-        <input
-          className="us-input tracking-[0.3em]"
-          placeholder="6 位邀请码"
-          value={inviteCode}
-          onChange={(e) => setInviteCode(e.target.value.toUpperCase())}
-          maxLength={6}
-        />
-      </div>
-      <div>
-        <label className="text-xs text-stone-500">在这个圈子里的昵称（可和别处不同）</label>
-        <input
-          className="us-input"
-          placeholder="朋友们怎么叫你"
-          value={nickname}
-          onChange={(e) => {
-            setNickname(e.target.value)
-            setNickError("")
-          }}
-        />
-        {nickError && <p className="text-xs text-red-700 mt-1.5">{nickError}</p>}
-      </div>
-      <button className="us-btn" disabled={busy} onClick={handleJoin}>
-        {busy ? "加入中…" : "加入圈子"}
-      </button>
-    </div>
-  )
-
-  // ---------- 新身份：先展示恢复码 ----------
-  if (recoveryShow) {
+  // ---------- 注册/找回成功：强制展示找回凭证 ----------
+  if (forced) {
     return (
       <div className="min-h-screen flex items-center justify-center px-6">
         <div className="w-full max-w-md">
           <RecoveryCard
-            code={recoveryShow.code}
+            code={forced.code}
             onContinue={() => {
-              const s = recoveryShow.session
-              setRecoveryShow(null)
-              // 建圈流程：恢复码之后落到邀请码卡；加入流程直接进圈
-              if (!createdCode) onDone(s)
+              const a = forced.account
+              setForced(null)
+              onDone(a)
             }}
           />
         </div>
@@ -409,81 +136,11 @@ export default function Onboarding({
     )
   }
 
-  // ---------- 建圈成功：邀请码常驻，确认后才进圈 ----------
-  if (createdCode && createdSession) {
-    return (
-      <div className="min-h-screen flex items-center justify-center px-6">
-        <div className="w-full max-w-md">
-          <InviteCard code={createdCode} onContinue={() => onDone(createdSession)} />
-        </div>
-      </div>
-    )
+  const switchMode = (m: "login" | "register" | "reset") => {
+    setMode(m)
+    setError("")
   }
 
-  // ---------- 有圈子：列表为主视觉 ----------
-  if (hasCircles) {
-    return (
-      <div className="min-h-screen px-6 py-12">
-        <div className="max-w-2xl mx-auto us-rise">
-          <h1 className="us-serif text-4xl mb-2">我们</h1>
-          <p className="text-stone-500 mb-10">
-            {accountNickname}，欢迎回来。去哪个圈子坐坐？
-          </p>
-
-          {onCancel && (
-            <button
-              className="us-btn-ghost text-sm mb-6 border border-[#264653]/20"
-              onClick={onCancel}
-            >
-              ← 返回当前圈子
-            </button>
-          )}
-
-          <div className="flex flex-col gap-4 mb-12">
-            {myCircles!.map((c, i) => (
-              <button
-                key={c.circle_id}
-                onClick={() => enterCircle(c)}
-                className="us-rise text-left bg-white/60 rounded-2xl px-6 py-5 transition-all duration-200 hover:bg-white/90 hover:translate-y-[-1px]"
-                style={{ animationDelay: `${i * 80}ms` }}
-              >
-                <div className="flex items-baseline justify-between gap-3">
-                  <span className="us-serif text-xl">{c.circle_name}</span>
-                  <span className="text-xs text-stone-400 shrink-0">
-                    邀请码 {c.invite_code} · {c.member_count} 位成员
-                  </span>
-                </div>
-                <div className="flex items-baseline justify-between gap-3 mt-2">
-                  <span className="text-sm text-stone-500">
-                    我在圈里叫「{c.my_nickname}」
-                  </span>
-                  <span className="text-xs text-[#264653]/70 shrink-0">{activeLabel(c)}</span>
-                </div>
-              </button>
-            ))}
-          </div>
-
-          <div className="grid sm:grid-cols-2 gap-8">
-            <section>
-              <h3 className="us-serif text-lg mb-4 pb-2 border-b border-[#264653]/10">
-                建一个新圈子
-              </h3>
-              {createForm}
-            </section>
-            <section>
-              <h3 className="us-serif text-lg mb-4 pb-2 border-b border-[#264653]/10">
-                加入新圈子
-              </h3>
-              {joinForm}
-            </section>
-          </div>
-          {error && <p className="text-sm text-red-700 mt-4">{error}</p>}
-        </div>
-      </div>
-    )
-  }
-
-  // ---------- 首次访问：创建 / 加入 / 找回身份 ----------
   return (
     <div className="min-h-screen flex items-center justify-center px-6">
       <div className="w-full max-w-md us-rise">
@@ -494,145 +151,134 @@ export default function Onboarding({
           3-10 个人的小圈子，刚好。
         </p>
 
-        {mode === "choose" && (
-          <div className="flex flex-col gap-3">
-            <button className="us-btn w-full py-3" onClick={() => setMode("create")}>
-              建一个新圈子
-            </button>
-            <button
-              className="us-btn-ghost w-full py-3 border border-[#264653]/20"
-              onClick={() => setMode("join")}
-            >
-              我有邀请码，加入圈子
-            </button>
-            <button
-              className="text-sm text-stone-400 hover:text-[#264653] transition-colors mt-3"
-              onClick={() => setMode("claim")}
-            >
-              换了设备？用恢复码找回身份
-            </button>
+        <div className="flex flex-col gap-5">
+          <div>
+            <label className="text-xs text-stone-500">账号名</label>
+            <input
+              className="us-input"
+              placeholder="全局唯一，朋友们靠它找不到你——只靠邀请码"
+              value={username}
+              maxLength={32}
+              onChange={(e) => {
+                setUsername(e.target.value)
+                setError("")
+              }}
+            />
           </div>
-        )}
 
-        {mode === "create" && (
-          <div className="flex flex-col gap-6">
-            {createForm}
-            {error && <p className="text-sm text-red-700">{error}</p>}
-            <button className="us-btn-ghost self-start" onClick={() => setMode("choose")}>
-              返回
-            </button>
-          </div>
-        )}
-
-        {mode === "join" && (
-          <div className="flex flex-col gap-6">
-            {joinForm}
-            {error && <p className="text-sm text-red-700">{error}</p>}
-            <button className="us-btn-ghost self-start" onClick={() => setMode("choose")}>
-              返回
-            </button>
-          </div>
-        )}
-
-        {mode === "claim" && (
-          <div className="flex flex-col gap-6">
+          {mode !== "reset" && (
             <div>
-              <label className="text-xs text-stone-500">身份恢复码</label>
+              <label className="text-xs text-stone-500">
+                密码{mode === "register" && "（可空，不填以后只凭账号名登录）"}
+              </label>
               <input
                 className="us-input"
-                placeholder="输入你的身份码"
-                value={recoveryInput}
-                onChange={(e) => setRecoveryInput(e.target.value)}
-              />
-              <p className="text-xs text-stone-400 mt-2">
-                第一次创建身份时展示过的那串字符（后来自己改过的就用改后的）
-              </p>
-            </div>
-            {error && <p className="text-sm text-red-700">{error}</p>}
-            <div className="flex gap-3">
-              <button className="us-btn flex-1" disabled={busy} onClick={handleClaim}>
-                {busy ? "找回中…" : "找回我的圈子"}
-              </button>
-              <button className="us-btn-ghost" onClick={() => setMode("choose")}>
-                返回
-              </button>
-            </div>
-
-            {/* 按名字找回身份码（特定码门） */}
-            <div className="pt-4 border-t border-[#264653]/10">
-              <button
-                className="text-sm text-stone-400 hover:text-[#264653] transition-colors"
-                onClick={() => {
-                  setLookupOpen((v) => !v)
-                  setLookupResults(null)
+                type="password"
+                placeholder={mode === "login" ? "没设过密码就留空" : "随便设，没有格式要求"}
+                value={password}
+                onChange={(e) => {
+                  setPassword(e.target.value)
                   setError("")
                 }}
-              >
-                忘了身份码？按名字找回
-              </button>
-              {lookupOpen && (
-                <div className="flex flex-col gap-3 mt-3">
-                  <input
-                    className="us-input"
-                    placeholder="特定码（找圈主要）"
-                    value={lookupCode}
-                    onChange={(e) => {
-                      setLookupCode(e.target.value)
-                      setLookupResults(null) // 改输入即清旧结果，避免"没找到"残留误导
-                    }}
-                  />
-                  <input
-                    className="us-input"
-                    placeholder="你在圈子里的名字"
-                    value={lookupName}
-                    onChange={(e) => {
-                      setLookupName(e.target.value)
-                      setLookupResults(null)
-                    }}
-                    onKeyDown={(e) =>
-                      e.key === "Enter" && !e.nativeEvent.isComposing && handleLookup()
-                    }
-                  />
-                  <button
-                    className="us-btn-ghost border border-[#264653]/15"
-                    disabled={busy}
-                    onClick={handleLookup}
-                  >
-                    {busy ? "查询中…" : "查一下"}
-                  </button>
-                  {lookupResults &&
-                    (lookupResults.length === 0 ? (
-                      <p className="text-xs text-stone-400 text-center">
-                        没有找到叫这个名字的成员
-                      </p>
-                    ) : (
-                      <div className="flex flex-col gap-2">
-                        {lookupResults.map((r, i) => (
-                          <div
-                            key={i}
-                            className="flex items-center justify-between bg-white/60 rounded-xl px-4 py-3"
-                          >
-                            <div>
-                              <p className="text-xs text-stone-500">
-                                {r.circle_name} · {r.nickname}
-                              </p>
-                              <p className="text-base font-medium">{r.recovery_code}</p>
-                            </div>
-                            <button
-                              className="us-btn-ghost text-xs border border-[#264653]/15"
-                              onClick={() => copyLookupCode(r.recovery_code, i)}
-                            >
-                              {copiedIdx === i ? "已复制 ✓" : "复制"}
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    ))}
-                </div>
-              )}
+                onKeyDown={(e) =>
+                  e.key === "Enter" &&
+                  !e.nativeEvent.isComposing &&
+                  (mode === "login" ? handleLogin() : handleRegister())
+                }
+              />
             </div>
+          )}
+
+          {mode === "register" && (
+            <div>
+              <label className="text-xs text-stone-500">昵称（可空，默认用账号名）</label>
+              <input
+                className="us-input"
+                placeholder="怎么称呼你"
+                value={nickname}
+                onChange={(e) => setNickname(e.target.value)}
+              />
+            </div>
+          )}
+
+          {mode === "reset" && (
+            <>
+              <div>
+                <label className="text-xs text-stone-500">找回凭证</label>
+                <input
+                  className="us-input"
+                  placeholder="注册时展示过的那串字符"
+                  value={recoveryInput}
+                  onChange={(e) => {
+                    setRecoveryInput(e.target.value)
+                    setError("")
+                  }}
+                />
+              </div>
+              <div>
+                <label className="text-xs text-stone-500">新密码（留空 = 以后只凭账号名登录）</label>
+                <input
+                  className="us-input"
+                  type="password"
+                  placeholder="随便设，没有格式要求"
+                  value={newPassword}
+                  onChange={(e) => {
+                    setNewPassword(e.target.value)
+                    setError("")
+                  }}
+                  onKeyDown={(e) =>
+                    e.key === "Enter" && !e.nativeEvent.isComposing && handleReset()
+                  }
+                />
+              </div>
+            </>
+          )}
+
+          {error && <p className="text-sm text-red-700">{error}</p>}
+
+          {mode === "login" && (
+            <button className="us-btn w-full py-3" disabled={busy} onClick={handleLogin}>
+              {busy ? "登录中…" : "登录"}
+            </button>
+          )}
+          {mode === "register" && (
+            <button className="us-btn w-full py-3" disabled={busy} onClick={handleRegister}>
+              {busy ? "注册中…" : "注册"}
+            </button>
+          )}
+          {mode === "reset" && (
+            <button className="us-btn w-full py-3" disabled={busy} onClick={handleReset}>
+              {busy ? "重置中…" : "重置密码"}
+            </button>
+          )}
+
+          <div className="flex flex-col items-center gap-2 pt-2">
+            {mode !== "login" && (
+              <button
+                className="text-sm text-stone-400 hover:text-[#264653] transition-colors"
+                onClick={() => switchMode("login")}
+              >
+                已有账号？登录
+              </button>
+            )}
+            {mode !== "register" && (
+              <button
+                className="text-sm text-stone-400 hover:text-[#264653] transition-colors"
+                onClick={() => switchMode("register")}
+              >
+                没有账号？注册一个
+              </button>
+            )}
+            {mode !== "reset" && (
+              <button
+                className="text-sm text-stone-400 hover:text-[#264653] transition-colors"
+                onClick={() => switchMode("reset")}
+              >
+                忘记密码？用找回凭证重置
+              </button>
+            )}
           </div>
-        )}
+        </div>
       </div>
     </div>
   )

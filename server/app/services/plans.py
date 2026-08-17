@@ -1,8 +1,9 @@
 """每日计划：单一今日清单，AI 懒生成条目与用户自定义条目混排，打勾/编辑/删除。
 
-懒生成照抄周报四层模式（reports.list_reports）：plan_items 表即缓存（按 user_id+date 查
-source='ai'）、cache 旗标防抖 plan_generating:{user}:{date} ex=600、路由层 BackgroundTasks
-接力、tasks.run_task 包裹。无目标也可用：自定义条目 goal_id 为 NULL。
+账号级数据（account_id，跨圈唯一一份）。懒生成照抄周报四层模式（reports.list_reports）：
+plan_items 表即缓存（按 account_id+date 查 source='ai'）、cache 旗标防抖
+plan_generating:{account}:{date} ex=600、路由层 BackgroundTasks 接力、tasks.run_task 包裹。
+无目标也可用：自定义条目 goal_id 为 NULL。
 """
 import json
 import re
@@ -14,18 +15,13 @@ from fastapi import HTTPException
 from .. import ai
 from ..db import cache
 from ..db.database import get_conn
-from . import tasks
+from . import selfshare, tasks
 
 ITEM_KINDS = ("habit", "daily", "task")
 
 
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
-
-
-def _require_user(conn, user_id: str) -> None:
-    if conn.execute("SELECT 1 FROM users WHERE id = ?", (user_id,)).fetchone() is None:
-        raise HTTPException(status_code=404, detail="用户不存在")
 
 
 def _item_dict(row) -> dict:
@@ -52,25 +48,25 @@ def _progress_text(conn, goal) -> str:
     return f"累计完成 {done}/{total} 条计划条目"
 
 
-def today(user_id: str) -> dict:
-    """今日清单：无 AI 条目且用户有 active 目标时懒触发生成。
+def today(account_id: str) -> dict:
+    """今日清单：无 AI 条目且账号有 active 目标时懒触发生成。
 
     generating='trigger' 由路由层放 BackgroundTasks 接力并改写为 True（周报同款语义）。
     """
     conn = get_conn()
-    _require_user(conn, user_id)
+    selfshare.require_account(conn, account_id)
     day = date.today().isoformat()
     rows = conn.execute(
-        "SELECT * FROM plan_items WHERE user_id = ? AND date = ? ORDER BY created_at, rowid",
-        (user_id, day),
+        "SELECT * FROM plan_items WHERE account_id = ? AND date = ? ORDER BY created_at, rowid",
+        (account_id, day),
     ).fetchall()
     generating: bool | str = False
     if not any(r["source"] == "ai" for r in rows):
         has_goal = conn.execute(
-            "SELECT 1 FROM goals WHERE user_id = ? AND status = 'active' LIMIT 1", (user_id,)
+            "SELECT 1 FROM goals WHERE account_id = ? AND status = 'active' LIMIT 1", (account_id,)
         ).fetchone()
         if has_goal:
-            flag = f"plan_generating:{user_id}:{day}"
+            flag = f"plan_generating:{account_id}:{day}"
             if not cache.client.get(flag):
                 cache.client.set(flag, "1", ex=600)
                 generating = "trigger"
@@ -79,7 +75,7 @@ def today(user_id: str) -> dict:
     return {"date": day, "items": [_item_dict(r) for r in rows], "generating": generating}
 
 
-def generate_today(user_id: str) -> dict:
+def generate_today(account_id: str) -> dict:
     """后台生成今日 AI 条目：各 active 目标的规则框架 + 昨日未完成条目（学习补足上下文）。
 
     已有 AI 条目直接返回（幂等）；失败经任务层重试后仍不行才 500。
@@ -87,20 +83,20 @@ def generate_today(user_id: str) -> dict:
     day = date.today().isoformat()
     conn = get_conn()
     existing = conn.execute(
-        "SELECT 1 FROM plan_items WHERE user_id = ? AND date = ? AND source = 'ai' LIMIT 1",
-        (user_id, day),
+        "SELECT 1 FROM plan_items WHERE account_id = ? AND date = ? AND source = 'ai' LIMIT 1",
+        (account_id, day),
     ).fetchone()
     if existing:
         return {"status": "exists"}
 
     def _job() -> None:
         goals = conn.execute(
-            "SELECT * FROM goals WHERE user_id = ? AND status = 'active'", (user_id,)
+            "SELECT * FROM goals WHERE account_id = ? AND status = 'active'", (account_id,)
         ).fetchall()
         yesterday = (date.today() - timedelta(days=1)).isoformat()
         unfinished = conn.execute(
-            "SELECT goal_id, content FROM plan_items WHERE user_id = ? AND date = ? AND done = 0",
-            (user_id, yesterday),
+            "SELECT goal_id, content FROM plan_items WHERE account_id = ? AND date = ? AND done = 0",
+            (account_id, yesterday),
         ).fetchall()
         for goal in goals:
             framework = json.loads(goal["framework"] or "{}")
@@ -117,15 +113,15 @@ def generate_today(user_id: str) -> dict:
                 if kind not in ITEM_KINDS:
                     kind = "daily"
                 conn.execute(
-                    """INSERT INTO plan_items (id, user_id, goal_id, date, content, kind, source, done, created_at)
+                    """INSERT INTO plan_items (id, account_id, goal_id, date, content, kind, source, done, created_at)
                        VALUES (?, ?, ?, ?, ?, ?, 'ai', 0, ?)""",
-                    (uuid.uuid4().hex[:12], user_id, goal["id"], day, content, kind, _now()),
+                    (uuid.uuid4().hex[:12], account_id, goal["id"], day, content, kind, _now()),
                 )
         conn.commit()
 
-    if tasks.run_task("daily_plan", f"{user_id}:{day}", _job) == "failed":
+    if tasks.run_task("daily_plan", f"{account_id}:{day}", _job) == "failed":
         raise HTTPException(status_code=500, detail="计划生成失败，请稍后重试")
-    cache.client.delete(f"plan_generating:{user_id}:{day}")
+    cache.client.delete(f"plan_generating:{account_id}:{day}")
     return {"status": "generated"}
 
 
@@ -138,7 +134,7 @@ def _valid_day(day: str) -> str:
 
 
 def add_item(
-    user_id: str,
+    account_id: str,
     content: str,
     day: str | None = None,
     goal_id: str | None = None,
@@ -146,7 +142,7 @@ def add_item(
 ) -> dict:
     """自定义条目（source='custom'）：goal_id 可空，无目标也能用。"""
     conn = get_conn()
-    _require_user(conn, user_id)
+    selfshare.require_account(conn, account_id)
     content = (content or "").strip()[:100]
     if not content:
         raise HTTPException(status_code=400, detail="内容不能为空")
@@ -154,30 +150,30 @@ def add_item(
         raise HTTPException(status_code=400, detail="kind 只能是 habit/daily/task")
     day = _valid_day(day) if day else date.today().isoformat()
     if goal_id:
-        goal = conn.execute("SELECT user_id FROM goals WHERE id = ?", (goal_id,)).fetchone()
+        goal = conn.execute("SELECT account_id FROM goals WHERE id = ?", (goal_id,)).fetchone()
         if goal is None:
             raise HTTPException(status_code=404, detail="目标不存在")
-        if goal["user_id"] != user_id:
+        if goal["account_id"] != account_id:
             raise HTTPException(status_code=403, detail="只能关联自己的目标")
     item_id = uuid.uuid4().hex[:12]
     conn.execute(
-        """INSERT INTO plan_items (id, user_id, goal_id, date, content, kind, source, done, created_at)
+        """INSERT INTO plan_items (id, account_id, goal_id, date, content, kind, source, done, created_at)
            VALUES (?, ?, ?, ?, ?, ?, 'custom', 0, ?)""",
-        (item_id, user_id, goal_id or None, day, content, kind, _now()),
+        (item_id, account_id, goal_id or None, day, content, kind, _now()),
     )
     conn.commit()
     return {"id": item_id, "status": "created"}
 
 
 def update_item(
-    item_id: str, user_id: str, content: str | None = None, done: bool | None = None
+    item_id: str, account_id: str, content: str | None = None, done: bool | None = None
 ) -> dict:
     """改内容 / 打勾（仅 owner）；AI 条目无特殊地位，同样可改可勾。"""
     conn = get_conn()
     row = conn.execute("SELECT * FROM plan_items WHERE id = ?", (item_id,)).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="条目不存在")
-    if row["user_id"] != user_id:
+    if row["account_id"] != account_id:
         raise HTTPException(status_code=403, detail="只能改自己的条目")
     if content is not None:
         content = content.strip()[:100]
@@ -190,13 +186,13 @@ def update_item(
     return {"id": item_id, "status": "updated"}
 
 
-def delete_item(item_id: str, user_id: str) -> dict:
+def delete_item(item_id: str, account_id: str) -> dict:
     """删除条目（仅 owner）。"""
     conn = get_conn()
-    row = conn.execute("SELECT user_id FROM plan_items WHERE id = ?", (item_id,)).fetchone()
+    row = conn.execute("SELECT account_id FROM plan_items WHERE id = ?", (item_id,)).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="条目不存在")
-    if row["user_id"] != user_id:
+    if row["account_id"] != account_id:
         raise HTTPException(status_code=403, detail="只能删自己的条目")
     conn.execute("DELETE FROM plan_items WHERE id = ?", (item_id,))
     conn.commit()

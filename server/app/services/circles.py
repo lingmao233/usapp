@@ -10,7 +10,6 @@ from datetime import datetime
 
 from fastapi import HTTPException
 
-from ..config import settings
 from ..db.database import generate_recovery_code, get_conn
 
 MAX_MEMBERS = 14
@@ -210,40 +209,23 @@ def get_circle(circle_id: str) -> dict:
 
 
 def get_account(account_id: str) -> dict:
-    """身份详情（含恢复码，供"我的身份码"查看）。"""
+    """账号详情（含找回凭证，供"我的找回凭证"查看）。"""
     account = _get_account(account_id)
     if account is None:
-        raise HTTPException(status_code=404, detail="身份不存在")
+        raise HTTPException(status_code=404, detail="账号不存在")
     return {
         "account_id": account["id"],
+        "username": account["username"],
         "nickname": account["nickname"],
+        "has_password": bool(account["password_hash"]),
         "recovery_code": account["recovery_code"],
     }
 
 
-def claim_account(recovery_code: str) -> dict:
-    """身份码登录：先精确匹配（自定义码区分大小写、支持任意字符）；
-    没中再按 ASCII 大小写不敏感匹配（兼容存量 6/8 位字母数字码）。"""
-    code = recovery_code.strip()
-    if not code:
-        raise HTTPException(status_code=400, detail="填一下身份码")
-    conn = get_conn()
-    account = conn.execute(
-        "SELECT * FROM accounts WHERE recovery_code = ?", (code,)
-    ).fetchone()
-    if account is None:
-        account = conn.execute(
-            "SELECT * FROM accounts WHERE UPPER(recovery_code) = ?", (code.upper(),)
-        ).fetchone()
-    if account is None:
-        raise HTTPException(status_code=404, detail="没找到这个身份码，检查一下有没有输错")
-    return {"account_id": account["id"], "nickname": account["nickname"]}
-
-
 def reset_recovery_code(account_id: str) -> dict:
-    """重置身份码：新随机 6 位码，旧码立即失效。"""
+    """重置找回凭证：新随机 6 位码，旧凭证立即失效。"""
     if _get_account(account_id) is None:
-        raise HTTPException(status_code=404, detail="身份不存在")
+        raise HTTPException(status_code=404, detail="账号不存在")
     conn = get_conn()
     new_code = generate_recovery_code()
     conn.execute(
@@ -254,52 +236,27 @@ def reset_recovery_code(account_id: str) -> dict:
 
 
 def set_recovery_code(account_id: str, code: str) -> dict:
-    """自主选择身份码：不限字符与长度（汉字/字母/数字/符号均可），仅要求非空、≤64 字、全局唯一。"""
+    """自设找回凭证：不限字符与长度（汉字/字母/数字/符号均可），仅要求非空、≤64 字、全局唯一。"""
     if _get_account(account_id) is None:
-        raise HTTPException(status_code=404, detail="身份不存在")
+        raise HTTPException(status_code=404, detail="账号不存在")
     normalized = code.strip()
     if not normalized:
-        raise HTTPException(status_code=400, detail="身份码不能为空")
+        raise HTTPException(status_code=400, detail="找回凭证不能为空")
     if len(normalized) > 64:
-        raise HTTPException(status_code=400, detail="身份码最长 64 个字符")
-    # 唯一性：精确匹配 + ASCII 大小写折叠双查，防与存量码在 claim 端撞车
+        raise HTTPException(status_code=400, detail="找回凭证最长 64 个字符")
+    # 唯一性：精确匹配 + ASCII 大小写折叠双查，防与其他账号的凭证在 reset 端撞车
     exists = get_conn().execute(
         "SELECT id FROM accounts WHERE (recovery_code = ? OR UPPER(recovery_code) = ?) AND id != ?",
         (normalized, normalized.upper(), account_id),
     ).fetchone()
     if exists:
-        raise HTTPException(status_code=409, detail="这个身份码已经被人用了，换一个")
+        raise HTTPException(status_code=409, detail="这个找回凭证已经被人用了，换一个")
     conn = get_conn()
     conn.execute(
         "UPDATE accounts SET recovery_code = ? WHERE id = ?", (normalized, account_id)
     )
     conn.commit()
     return {"account_id": account_id, "recovery_code": normalized}
-
-
-def lookup_recovery_codes(access_code: str, nickname: str) -> dict:
-    """按名字找回身份码（共享口令门）：特定码核验 → 按圈内昵称搜成员 → 圈子名+身份码列表。
-
-    特定码在 RECOVERY_ACCESS_CODES 配置（多个逗号分隔，汉字/字母均可），未配置一律拒绝。
-    注意：身份码即登录凭证，此接口对持码者是明文暴露——仅面向熟人小圈子场景，
-    特定码本身要当密码保管，泄露即换。
-    """
-    if not settings.RECOVERY_ACCESS_CODES or access_code.strip() not in settings.RECOVERY_ACCESS_CODES:
-        raise HTTPException(status_code=403, detail="特定码不对")
-    name = nickname.strip()
-    if not name:
-        raise HTTPException(status_code=400, detail="名字不能为空")
-    rows = get_conn().execute(
-        """SELECT c.name AS circle_name, u.nickname AS nickname, a.recovery_code AS recovery_code
-           FROM users u
-           JOIN circles c ON c.id = u.circle_id
-           JOIN memberships m ON m.user_id = u.id
-           JOIN accounts a ON a.id = m.account_id
-           WHERE u.nickname = ? AND a.recovery_code IS NOT NULL AND a.recovery_code != ''
-           ORDER BY c.created_at""",
-        (name,),
-    ).fetchall()
-    return {"results": [dict(r) for r in rows]}
 
 
 def list_members(circle_id: str) -> list[dict]:

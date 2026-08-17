@@ -1,20 +1,23 @@
 /** API 客户端（web 组装壳）：平台无关核心在 @/core，这里注入 fetch 与 localStorage。
  *
  * 只走相对路径 /api，由 vite proxy（开发）或同源后端（生产）转发到 FastAPI。
- * 导出签名与重构前完全一致，页面文件无需改动。
+ * 登录态：圈子 session（us.session）+ 账号信息（us_account）+ account_id（us_account_id）。
  */
 import { createApi } from "@/core/api"
 import { extractDetail, type RequestFn } from "@/core/http"
 import {
+  clearAccount as coreClearAccount,
   clearAccountId as coreClearAccountId,
   clearSession as coreClearSession,
+  loadAccount as coreLoadAccount,
   loadAccountId as coreLoadAccountId,
   loadSession as coreLoadSession,
+  saveAccount as coreSaveAccount,
   saveAccountId as coreSaveAccountId,
   saveSession as coreSaveSession,
   type StorageLike,
 } from "@/core/storage"
-import type { Session } from "@/core/types"
+import type { AccountInfo, Session } from "@/core/types"
 
 const webStorage: StorageLike = {
   getItem: (key) => localStorage.getItem(key),
@@ -66,10 +69,14 @@ export const clearSession = () => coreClearSession(webStorage)
 export const loadAccountId = () => coreLoadAccountId(webStorage)
 export const saveAccountId = (id: string) => coreSaveAccountId(webStorage, id)
 export const clearAccountId = () => coreClearAccountId(webStorage)
+export const loadAccount = () => coreLoadAccount(webStorage)
+export const saveAccount = (a: AccountInfo) => coreSaveAccount(webStorage, a)
+export const clearAccount = () => coreClearAccount(webStorage)
 
 export type {
   AccountCircle,
   AccountCirclesResp,
+  AccountInfo,
   CalorieDay,
   CalorieEntry,
   CalorieItem,
@@ -80,6 +87,10 @@ export type {
   ExerciseEquiv,
   Expense,
   Fragment,
+  FriendGoal,
+  FriendMember,
+  FriendPlan,
+  FriendTasksResp,
   Goal,
   GraphEdge,
   GraphNode,
@@ -92,6 +103,8 @@ export type {
   Report,
   ReportMeta,
   Session,
+  SharingCategory,
+  SharingItem,
   TodayPlan,
   Wish,
   WishPlan,

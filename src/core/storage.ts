@@ -1,8 +1,9 @@
 /** 平台无关的本地存储抽象：web 注入 localStorage，小程序注入 Taro storage。
  *
  * key 名保持 us.session / us_account_id 不变，存量 web 用户不掉登录。
+ * 账号系统重构新增 us_account（登录态账号信息 JSON）。
  */
-import type { Session } from "./types"
+import type { AccountInfo, Session } from "./types"
 
 export interface StorageLike {
   getItem(key: string): string | null
@@ -40,4 +41,24 @@ export function saveAccountId(st: StorageLike, id: string) {
 
 export function clearAccountId(st: StorageLike) {
   st.removeItem(ACCOUNT_KEY)
+}
+
+const ACCOUNT_INFO_KEY = "us_account"
+
+/** 登录态账号信息（auth 响应去掉一次性 recovery_code 后落盘） */
+export function loadAccount(st: StorageLike): AccountInfo | null {
+  try {
+    const raw = st.getItem(ACCOUNT_INFO_KEY)
+    return raw ? (JSON.parse(raw) as AccountInfo) : null
+  } catch {
+    return null
+  }
+}
+
+export function saveAccount(st: StorageLike, a: AccountInfo) {
+  st.setItem(ACCOUNT_INFO_KEY, JSON.stringify(a))
+}
+
+export function clearAccount(st: StorageLike) {
+  st.removeItem(ACCOUNT_INFO_KEY)
 }

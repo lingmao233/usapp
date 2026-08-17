@@ -6,6 +6,7 @@
 import type { RequestFn } from "./http"
 import type {
   AccountCirclesResp,
+  AccountInfo,
   CalorieDay,
   CalorieEntry,
   ChatMessage,
@@ -14,6 +15,7 @@ import type {
   CommonWish,
   Expense,
   Fragment,
+  FriendTasksResp,
   Goal,
   KnowledgeItem,
   LedgerMonth,
@@ -23,6 +25,8 @@ import type {
   Report,
   ReportMeta,
   Session,
+  SharingCategory,
+  SharingItem,
   TodayPlan,
   Wish,
   WishPlan,
@@ -38,6 +42,35 @@ function unwrapList<T>(res: T[] | Record<string, unknown>, key: string): T[] {
 
 export function createApi(req: RequestFn) {
   return {
+    /* ---------------- 账号认证（用户名全局唯一 + 可选密码） ---------------- */
+
+    // 注册：409=账号名被占；响应带 recovery_code，前端必须强制展示一次
+    register: (username: string, password?: string, nickname?: string) =>
+      req<AccountInfo>("/api/auth/register", {
+        method: "POST",
+        body: { username, password: password || undefined, nickname: nickname || undefined },
+      }),
+
+    // 登录：无密码账号只验账号名；404 不存在 / 403 密码错
+    login: (username: string, password?: string) =>
+      req<AccountInfo>("/api/auth/login", {
+        method: "POST",
+        body: { username, password: password || undefined },
+      }),
+
+    // 找回：账号名 + 找回凭证 → 重设密码（空串=清空成无密码账号），可顺便自设新凭证；
+    // 响应带当前 recovery_code，前端须再次强制展示
+    reset: (username: string, recovery_code: string, new_password?: string, new_recovery_code?: string) =>
+      req<AccountInfo>("/api/auth/reset", {
+        method: "POST",
+        body: {
+          username,
+          recovery_code,
+          new_password: new_password ?? undefined,
+          new_recovery_code: new_recovery_code || undefined,
+        },
+      }),
+
     createCircle: (
       name: string,
       account_id?: string | null,
@@ -88,23 +121,22 @@ export function createApi(req: RequestFn) {
         },
       ),
 
+    /** @deprecated 个人恢复码登录体系已作废（后端 /api/accounts/claim 已下线）；
+     * 仅因 weapp 冻结版仍引用而保留签名，web 端不要再调。 */
     claimAccount: (recovery_code: string) =>
       req<{ account_id: string; nickname: string }>("/api/accounts/claim", {
         method: "POST",
         body: { recovery_code },
       }),
 
-    // 按名字找回身份码：特定码核验后返回 圈子名+身份码 列表
-    recoverLookup: (access_code: string, nickname: string) =>
-      req<{ results: { circle_name: string; nickname: string; recovery_code: string }[] }>(
-        "/api/accounts/recover-lookup",
-        { method: "POST", body: { access_code, nickname } },
-      ),
-
     getAccount: (account_id: string) =>
-      req<{ account_id: string; nickname: string; recovery_code: string }>(
-        `/api/accounts/${account_id}`,
-      ),
+      req<{
+        account_id: string
+        username: string
+        nickname: string
+        has_password: boolean
+        recovery_code: string
+      }>(`/api/accounts/${account_id}`),
 
     resetRecoveryCode: (account_id: string) =>
       req<{ account_id: string; recovery_code: string }>(
@@ -120,6 +152,31 @@ export function createApi(req: RequestFn) {
 
     accountCircles: (account_id: string) =>
       req<AccountCirclesResp>(`/api/accounts/${account_id}/circles`),
+
+    /* ---------------- Self 共享开关（类别 × 圈子，owner 操作） ---------------- */
+
+    listSharing: (account_id: string) =>
+      req<{ account_id: string; items: SharingItem[] }>(
+        `/api/self/sharing?account_id=${account_id}`,
+      ),
+
+    // 开/调共享（UPSERT）：goal/plan 的 level 缺省 progress；ledger/calorie 无档位
+    putSharing: (account_id: string, circle_id: string, category: SharingCategory, level?: string) =>
+      req<{ account_id: string; circle_id: string; category: string; level: string }>(
+        "/api/self/sharing",
+        { method: "PUT", body: { account_id, circle_id, category, level } },
+      ),
+
+    // 关闭共享（删行，幂等）
+    deleteSharing: (account_id: string, circle_id: string, category: SharingCategory) =>
+      req<{ status?: string }>(
+        `/api/self/sharing?account_id=${account_id}&circle_id=${circle_id}&category=${category}`,
+        { method: "DELETE" },
+      ),
+
+    // 朋友任务聚合：圈内其他成员共享出来的目标 + 今日计划，服务端按档位裁剪
+    friendTasks: (circle_id: string, account_id: string) =>
+      req<FriendTasksResp>(`/api/circles/${circle_id}/friend-tasks?account_id=${account_id}`),
 
     listMembers: (circle_id: string) =>
       req<{ members: { id: string; nickname: string }[] }>(`/api/circles/${circle_id}/members`),
@@ -243,126 +300,113 @@ export function createApi(req: RequestFn) {
 
     /* ---------------- 个人功能：目标 ---------------- */
 
-    // 建目标：params=目标参数、answers=问卷答案（均可空，服务端按通用默认值兜底并标 estimated）
+    // 建目标：params=目标参数、answers=问卷答案（均可空，服务端按通用默认值兜底并标 estimated）；
+    // 共享不在此设置——走 /api/self/sharing（类别 × 圈子开关）
     createGoal: (
-      user_id: string,
+      account_id: string,
       goal: {
         type: Goal["type"]
         title: string
         params: Record<string, unknown>
         answers: Record<string, unknown>
-        visible_circle_ids: string[]
-        detail_level: "summary" | "detail"
       },
     ) =>
       req<{ id: string; status: string; framework: Record<string, unknown> }>("/api/goals", {
         method: "POST",
-        body: { user_id, ...goal },
+        body: { account_id, ...goal },
       }),
 
     // 我的目标列表（服务端包 {goals}）
-    listGoals: async (user_id: string) =>
+    listGoals: async (account_id: string) =>
       unwrapList<Goal>(
-        await req<Goal[] | { goals?: Goal[] }>(`/api/goals?user_id=${user_id}`),
+        await req<Goal[] | { goals?: Goal[] }>(`/api/goals?account_id=${account_id}`),
         "goals",
       ),
 
     // 详情含 progress/framework；viewer 过滤在服务端（非授权 404）
-    getGoal: (id: string, viewer_id: string) =>
-      req<Goal>(`/api/goals/${id}?viewer_id=${viewer_id}`),
-
-    // 公开范围与粒度（仅 owner）；鞭策开关走单独的 nudge-toggle
-    updateGoalSharing: (
-      id: string,
-      user_id: string,
-      visible_circle_ids: string[],
-      detail_level: "summary" | "detail",
-    ) =>
-      req<{ id?: string; status?: string }>(`/api/goals/${id}/sharing`, {
-        method: "PUT",
-        body: { user_id, visible_circle_ids, detail_level },
-      }),
+    getGoal: (id: string, account_id: string) =>
+      req<Goal>(`/api/goals/${id}?account_id=${account_id}`),
 
     // 鞭策开关（仅 owner）
-    toggleNudge: (id: string, user_id: string, enabled: boolean) =>
+    toggleNudge: (id: string, account_id: string, enabled: boolean) =>
       req<{ id?: string; nudge_enabled?: boolean }>(`/api/goals/${id}/nudge-toggle`, {
         method: "POST",
-        body: { user_id, enabled },
+        body: { account_id, enabled },
       }),
 
-    // 圈内公开目标（Wall「伙伴目标」区；服务端包 {goals}，恒 summary 粒度）
-    circleGoals: async (circle_id: string, viewer_id: string) =>
+    // 圈内共享目标（服务端包 {goals}，按 self_sharing 档位裁剪）
+    circleGoals: async (circle_id: string, account_id: string) =>
       unwrapList<Goal>(
         await req<Goal[] | { goals?: Goal[] }>(
-          `/api/goals/circle/${circle_id}?viewer_id=${viewer_id}`,
+          `/api/goals/circle/${circle_id}?account_id=${account_id}`,
         ),
         "goals",
       ),
 
     /* ---------------- 个人功能：鞭策 ---------------- */
 
-    // 发鞭策（body 字段名是 user_id=发起者；限频同人一天 1 次 429，屏蔽/关鞭策 403）
-    sendNudge: (goal_id: string, from_user_id: string, message: string) =>
+    // 发鞭策（body 字段名是 account_id=发起者；限频同人一天 1 次 429，屏蔽/关鞭策 403）
+    sendNudge: (goal_id: string, from_account_id: string, message: string) =>
       req<{ id?: string; status?: string }>(`/api/goals/${goal_id}/nudges`, {
         method: "POST",
-        body: { user_id: from_user_id, message },
+        body: { account_id: from_account_id, message },
       }),
 
     // 鞭策留言列表（owner 全见；服务端包 {count, nudges}，圈友只见 count）
-    listNudges: async (goal_id: string, user_id: string) =>
+    listNudges: async (goal_id: string, account_id: string) =>
       unwrapList<Nudge>(
         await req<Nudge[] | { nudges?: Nudge[] }>(
-          `/api/goals/${goal_id}/nudges?user_id=${user_id}`,
+          `/api/goals/${goal_id}/nudges?account_id=${account_id}`,
         ),
         "nudges",
       ),
 
     // 按人屏蔽鞭策（仅 owner）
-    blockNudgeUser: (user_id: string, blocked_user_id: string) =>
+    blockNudgeUser: (account_id: string, blocked_account_id: string) =>
       req<{ status?: string }>("/api/nudge-blocks", {
         method: "POST",
-        body: { user_id, blocked_user_id },
+        body: { account_id, blocked_account_id },
       }),
 
     /* ---------------- 个人功能：今日计划 ---------------- */
 
     // 今日清单：懒生成语义照抄周报——generating 真值时前端 3s 轮询收敛
-    todayPlan: (user_id: string) => req<TodayPlan>(`/api/plans/today?user_id=${user_id}`),
+    todayPlan: (account_id: string) => req<TodayPlan>(`/api/plans/today?account_id=${account_id}`),
 
     // 自定义条目（无 goal_id）；date 缺省服务端取今天
-    addPlanItem: (user_id: string, content: string, date?: string) =>
+    addPlanItem: (account_id: string, content: string, date?: string) =>
       req<{ id?: string; status?: string }>("/api/plans/items", {
         method: "POST",
-        body: { user_id, content, date },
+        body: { account_id, content, date },
       }),
 
     // 改内容/打勾
-    updatePlanItem: (id: string, user_id: string, patch: { content?: string; done?: boolean }) =>
+    updatePlanItem: (id: string, account_id: string, patch: { content?: string; done?: boolean }) =>
       req<{ id?: string; status?: string }>(`/api/plans/items/${id}`, {
         method: "PUT",
-        body: { user_id, ...patch },
+        body: { account_id, ...patch },
       }),
 
-    deletePlanItem: (id: string, user_id: string) =>
-      req<{ id?: string; status?: string }>(`/api/plans/items/${id}?user_id=${user_id}`, {
+    deletePlanItem: (id: string, account_id: string) =>
+      req<{ id?: string; status?: string }>(`/api/plans/items/${id}?account_id=${account_id}`, {
         method: "DELETE",
       }),
 
     /* ---------------- 个人功能：记账（金额一律分，收入记负数） ---------------- */
 
     // 小票/截图识别 → 待确认行已落库（包 {items}，一图多笔）；未配视觉模型时后端 400
-    recognizeReceipt: async (user_id: string, image_url: string) =>
+    recognizeReceipt: async (account_id: string, image_url: string) =>
       unwrapList<Expense>(
         await req<Expense[] | { items?: Expense[] }>("/api/ledger/recognize", {
           method: "POST",
-          body: { user_id, image_url },
+          body: { account_id, image_url },
         }),
         "items",
       ),
 
     // 手动记一笔（直接 confirmed）
     addExpense: (
-      user_id: string,
+      account_id: string,
       item: {
         amount_fen: number
         category: string
@@ -373,13 +417,13 @@ export function createApi(req: RequestFn) {
     ) =>
       req<{ id?: string; status?: string }>("/api/ledger/expenses", {
         method: "POST",
-        body: { user_id, ...item },
+        body: { account_id, ...item },
       }),
 
     // 确认待入账（带 id，可同时改金额/分类等字段；重复确认幂等）。一图多笔=逐笔调用
     confirmExpense: (
       id: string,
-      user_id: string,
+      account_id: string,
       patch: {
         amount_fen?: number
         category?: string
@@ -390,16 +434,16 @@ export function createApi(req: RequestFn) {
     ) =>
       req<{ id?: string; status?: string }>("/api/ledger/expenses", {
         method: "POST",
-        body: { user_id, id, ...patch },
+        body: { account_id, id, ...patch },
       }),
 
     // 月账单：{month, items, month_total_fen, monthly_spendable_fen?}
-    listExpenses: (user_id: string, month: string) =>
-      req<LedgerMonth>(`/api/ledger/expenses?user_id=${user_id}&month=${month}`),
+    listExpenses: (account_id: string, month: string) =>
+      req<LedgerMonth>(`/api/ledger/expenses?account_id=${account_id}&month=${month}`),
 
     updateExpense: (
       id: string,
-      user_id: string,
+      account_id: string,
       patch: {
         amount_fen?: number
         category?: string
@@ -410,42 +454,42 @@ export function createApi(req: RequestFn) {
     ) =>
       req<{ id?: string; status?: string }>(`/api/ledger/expenses/${id}`, {
         method: "PUT",
-        body: { user_id, ...patch },
+        body: { account_id, ...patch },
       }),
 
-    deleteExpense: (id: string, user_id: string) =>
-      req<{ id?: string; status?: string }>(`/api/ledger/expenses/${id}?user_id=${user_id}`, {
+    deleteExpense: (id: string, account_id: string) =>
+      req<{ id?: string; status?: string }>(`/api/ledger/expenses/${id}?account_id=${account_id}`, {
         method: "DELETE",
       }),
 
     /* ---------------- 个人功能：热量 ---------------- */
 
     // 食物拍照识别（可附一句文字描述提准）→ 待确认行已落库（包 {entry}）；未配视觉模型时后端 400
-    recognizeFood: async (user_id: string, image_url: string, hint?: string) => {
+    recognizeFood: async (account_id: string, image_url: string, hint?: string) => {
       const res = await req<CalorieEntry | { entry?: CalorieEntry }>("/api/calories/recognize", {
         method: "POST",
-        body: { user_id, image_url, hint },
+        body: { account_id, image_url, hint },
       })
       return (res as { entry?: CalorieEntry }).entry ?? (res as CalorieEntry)
     },
 
     // 手动录入（直接 confirmed；服务端触发超预算联动，adjustment 非空=已加调整条目）
-    addCalorie: (user_id: string, total_kcal: number, note: string) =>
+    addCalorie: (account_id: string, total_kcal: number, note: string) =>
       req<{ id?: string; status?: string; adjustment?: { content?: string } | null }>(
         "/api/calories",
-        { method: "POST", body: { user_id, total_kcal, note } },
+        { method: "POST", body: { account_id, total_kcal, note } },
       ),
 
     // 确认待入账（带 id，总热量可改，改了服务端重算运动等效；同样触发联动）
-    confirmCalorie: (id: string, user_id: string, total_kcal?: number, note?: string) =>
+    confirmCalorie: (id: string, account_id: string, total_kcal?: number, note?: string) =>
       req<{ id?: string; status?: string; adjustment?: { content?: string } | null }>(
         "/api/calories",
-        { method: "POST", body: { user_id, id, total_kcal, note } },
+        { method: "POST", body: { account_id, id, total_kcal, note } },
       ),
 
     // 按日查询：{date, items, consumed_kcal, budget_kcal?}
-    listCalories: (user_id: string, date: string) =>
-      req<CalorieDay>(`/api/calories?user_id=${user_id}&date=${date}`),
+    listCalories: (account_id: string, date: string) =>
+      req<CalorieDay>(`/api/calories?account_id=${account_id}&date=${date}`),
   }
 }
 

@@ -1,7 +1,8 @@
-"""目标系统：账号级个人目标（减肥/存款/学习/自定义），可选公开到指定圈子接受鞭策。
+"""目标系统：账号级个人目标（减肥/存款/学习/自定义），跨圈唯一一份，挂在 account_id 上。
 
 - 周期框架（热量预算/月预算）建目标时由 rules 纯函数算出落库，不经 AI
-- 可见性三粒度：私有 / 圈友进度摘要 / 圈友含明细，过滤全在服务端（viewer_level）
+- 可见性由 self_sharing（类别 × 圈子开关，level=progress/detail）驱动，过滤全在服务端：
+  owner 全量 / 圈友按档位裁剪 / 未共享 404（不泄露存在性）
 - 存款目标读取时做月底结算懒检查：last_settled_month 游标 + 滚雪球重算（rules）+ AI 文案
 """
 import json
@@ -12,19 +13,13 @@ from fastapi import HTTPException
 
 from .. import ai
 from ..db.database import get_conn
-from . import rules
+from . import rules, selfshare
 
 GOAL_TYPES = ("weight_loss", "savings", "study", "custom")
-DETAIL_LEVELS = ("summary", "detail")
 
 
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
-
-
-def _require_user(conn, user_id: str) -> None:
-    if conn.execute("SELECT 1 FROM users WHERE id = ?", (user_id,)).fetchone() is None:
-        raise HTTPException(status_code=404, detail="用户不存在")
 
 
 def _month_add(month: str, n: int) -> str:
@@ -33,23 +28,7 @@ def _month_add(month: str, n: int) -> str:
     return f"{total // 12:04d}-{total % 12 + 1:02d}"
 
 
-def _check_circles(conn, user_id: str, circle_ids: list[str]) -> list[str]:
-    """可见圈子白名单校验：只能公开到自己所在的圈子；去重保序。"""
-    seen: list[str] = []
-    for cid in circle_ids:
-        if not isinstance(cid, str) or not cid:
-            raise HTTPException(status_code=400, detail="圈子 id 不合法")
-        if cid in seen:
-            continue
-        if conn.execute(
-            "SELECT 1 FROM users WHERE id = ? AND circle_id = ?", (user_id, cid)
-        ).fetchone() is None:
-            raise HTTPException(status_code=400, detail="只能公开到自己所在的圈子")
-        seen.append(cid)
-    return seen
-
-
-def _compute_framework(conn, goal_type: str, params: dict, answers: dict, user_id: str) -> dict:
+def _compute_framework(conn, goal_type: str, params: dict, answers: dict, account_id: str) -> dict:
     """周期框架：确定性规则计算（不经 AI）。study 直传每日时长给 AI 用，custom 无框架。"""
     if goal_type == "weight_loss":
         return rules.daily_calorie_budget(answers, params)
@@ -57,9 +36,9 @@ def _compute_framework(conn, goal_type: str, params: dict, answers: dict, user_i
         # 消费习惯画像：读取时 SQL 聚合近 90 天已入账支出（决策 8：不动 nightly 蒸馏）
         rows = conn.execute(
             """SELECT amount_fen, category, spent_at FROM expenses
-               WHERE user_id = ? AND status = 'confirmed' AND amount_fen > 0
+               WHERE account_id = ? AND status = 'confirmed' AND amount_fen > 0
                AND spent_at >= date('now', '-90 days')""",
-            (user_id,),
+            (account_id,),
         ).fetchall()
         profile = rules.spending_profile([dict(r) for r in rows]) if rows else None
         return rules.savings_monthly_plan(params, answers, profile)
@@ -74,43 +53,37 @@ def _compute_framework(conn, goal_type: str, params: dict, answers: dict, user_i
 
 
 def create_goal(
-    user_id: str,
+    account_id: str,
     goal_type: str,
     title: str,
     params: dict | None = None,
     answers: dict | None = None,
-    visible_circle_ids: list[str] | None = None,
-    detail_level: str = "summary",
 ) -> dict:
-    """建目标：按类型算周期框架落库；问卷可全跳过（rules 走默认值并标 estimated）。"""
+    """建目标：按类型算周期框架落库；问卷可全跳过（rules 走默认值并标 estimated）。
+    共享走 /api/self/sharing（类别 × 圈子开关），建目标不再带可见性参数。"""
     conn = get_conn()
-    _require_user(conn, user_id)
+    selfshare.require_account(conn, account_id)
     if goal_type not in GOAL_TYPES:
         raise HTTPException(status_code=400, detail="目标类型只支持 weight_loss/savings/study/custom")
     title = (title or "").strip()[:50]
     if not title:
         raise HTTPException(status_code=400, detail="标题不能为空")
-    if detail_level not in DETAIL_LEVELS:
-        raise HTTPException(status_code=400, detail="detail_level 只能是 summary 或 detail")
     params = params or {}
     answers = answers or {}
-    circles = _check_circles(conn, user_id, visible_circle_ids or [])
-    framework = _compute_framework(conn, goal_type, params, answers, user_id)
+    framework = _compute_framework(conn, goal_type, params, answers, account_id)
     goal_id = uuid.uuid4().hex[:12]
     conn.execute(
-        """INSERT INTO goals (id, user_id, type, title, params, answers, framework, status,
-           visible_circle_ids, detail_level, nudge_enabled, last_settled_month, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, 1, '', ?)""",
+        """INSERT INTO goals (id, account_id, type, title, params, answers, framework, status,
+           nudge_enabled, last_settled_month, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'active', 1, '', ?)""",
         (
             goal_id,
-            user_id,
+            account_id,
             goal_type,
             title,
             json.dumps(params, ensure_ascii=False),
             json.dumps(answers, ensure_ascii=False),
             json.dumps(framework, ensure_ascii=False),
-            json.dumps(circles, ensure_ascii=False),
-            detail_level,
             _now(),
         ),
     )
@@ -160,7 +133,6 @@ def _to_dict(conn, row) -> dict:
     d["params"] = json.loads(d.get("params") or "{}")
     d["answers"] = json.loads(d.get("answers") or "{}")
     d["framework"] = json.loads(d.get("framework") or "{}")
-    d["visible_circle_ids"] = json.loads(d.get("visible_circle_ids") or "[]")
     d["nudge_enabled"] = bool(d["nudge_enabled"])
     d["progress"] = _progress(conn, row)
     return d
@@ -168,37 +140,48 @@ def _to_dict(conn, row) -> dict:
 
 _SUMMARY_KEYS = (
     "id", "type", "title", "status", "created_at",
-    "detail_level", "nudge_enabled", "owner_nickname", "progress",
+    "nudge_enabled", "owner_nickname", "progress",
 )
 
 
 def _trim_summary(d: dict) -> dict:
-    """圈友 summary 粒度：只留进度摘要，裁掉体重/金额/问卷等明细字段。"""
+    """圈友 progress 粒度：只留进度摘要，裁掉体重/金额/问卷等明细字段。"""
     return {k: d[k] for k in _SUMMARY_KEYS if k in d}
 
 
-def viewer_level(goal: dict, viewer_id: str | None) -> str | None:
+def _circle_nickname(conn, account_id: str, circle_id: str) -> str | None:
+    """某账号在指定圈子里的圈内昵称（无 membership 返回 None）。"""
+    row = conn.execute(
+        """SELECT u.nickname FROM memberships m JOIN users u ON u.id = m.user_id
+           WHERE m.account_id = ? AND m.circle_id = ?""",
+        (account_id, circle_id),
+    ).fetchone()
+    return row["nickname"] if row else None
+
+
+def _shared_circle_with(conn, owner_account_id: str, viewer_account_id: str, category: str) -> str | None:
+    """owner 共享该类别的圈子里，任选一个 viewer 也是成员的圈子 id。"""
+    row = conn.execute(
+        """SELECT s.circle_id FROM self_sharing s
+           JOIN memberships m ON m.circle_id = s.circle_id AND m.account_id = ?
+           WHERE s.account_id = ? AND s.category = ? LIMIT 1""",
+        (viewer_account_id, owner_account_id, category),
+    ).fetchone()
+    return row["circle_id"] if row else None
+
+
+def viewer_level(goal: dict, viewer_account_id: str | None) -> str | None:
     """viewer 对目标的可见级别：owner / circle / None（不可见）。
 
-    圈友可见 = 目标公开的圈子里，存在一个圈子 viewer 与 owner 同为 membership。
-    nudges 模块复用本判定做鞭策入口校验。
+    圈友可见 = owner 把 goal 类别共享到的圈子里，存在一个圈子 viewer 也是成员
+    （selfshare.share_level）。nudges 模块复用本判定做鞭策入口校验。
     """
-    if not viewer_id:
+    if not viewer_account_id:
         return None
-    if viewer_id == goal["user_id"]:
+    if viewer_account_id == goal["account_id"]:
         return "owner"
-    circle_ids = goal.get("visible_circle_ids") or []
-    if isinstance(circle_ids, str):
-        circle_ids = json.loads(circle_ids or "[]")
-    if not circle_ids:
-        return None
-    marks = ",".join("?" * len(circle_ids))
-    row = get_conn().execute(
-        f"""SELECT 1 FROM users o JOIN users v ON v.circle_id = o.circle_id
-            WHERE o.id = ? AND v.id = ? AND o.circle_id IN ({marks}) LIMIT 1""",
-        [goal["user_id"], viewer_id, *circle_ids],
-    ).fetchone()
-    return "circle" if row else None
+    level = selfshare.share_level(get_conn(), goal["account_id"], viewer_account_id, "goal")
+    return "circle" if level else None
 
 
 def _maybe_settle(conn, goal) -> None:
@@ -226,8 +209,8 @@ def _maybe_settle(conn, goal) -> None:
             """SELECT COALESCE(SUM(CASE WHEN amount_fen > 0 THEN amount_fen ELSE 0 END), 0) AS spent,
                       COALESCE(SUM(CASE WHEN amount_fen < 0 THEN -amount_fen ELSE 0 END), 0) AS extra
                FROM expenses
-               WHERE user_id = ? AND status = 'confirmed' AND substr(spent_at, 1, 7) = ?""",
-            (goal["user_id"], month),
+               WHERE account_id = ? AND status = 'confirmed' AND substr(spent_at, 1, 7) = ?""",
+            (goal["account_id"], month),
         ).fetchone()
         actual = fixed_income + int(row["extra"]) - int(row["spent"])
         settlement = rules.savings_settlement({"params": params}, actual)
@@ -256,100 +239,100 @@ def _maybe_settle(conn, goal) -> None:
     conn.commit()
 
 
-def get_goal(goal_id: str, viewer_id: str | None) -> dict:
-    """目标详情：owner 全量；圈友校验共同圈子 + 按 detail_level 裁剪；其余 404（不泄露存在性）。"""
+def get_goal(goal_id: str, viewer_account_id: str | None) -> dict:
+    """目标详情：owner 全量；圈友按 self_sharing 档位裁剪（progress 裁明细）；其余 404。"""
     conn = get_conn()
     row = conn.execute("SELECT * FROM goals WHERE id = ?", (goal_id,)).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="目标不存在")
     _maybe_settle(conn, row)  # 存款目标读取时懒结算，结算后重读
     row = conn.execute(
-        """SELECT g.*, u.nickname AS owner_nickname FROM goals g
-           LEFT JOIN users u ON u.id = g.user_id WHERE g.id = ?""",
+        """SELECT g.*, a.nickname AS owner_nickname FROM goals g
+           LEFT JOIN accounts a ON a.id = g.account_id WHERE g.id = ?""",
         (goal_id,),
     ).fetchone()
-    level = viewer_level(dict(row), viewer_id)
+    level = viewer_level(dict(row), viewer_account_id)
     if level is None:
         raise HTTPException(status_code=404, detail="目标不存在")
     d = _to_dict(conn, row)
     if level == "owner":
         return d
-    if row["detail_level"] == "summary":
+    share = selfshare.share_level(conn, row["account_id"], viewer_account_id, "goal")
+    # 圈友视角的 owner_nickname 用圈内昵称（圈语境），退账号昵称
+    shared_circle = _shared_circle_with(conn, row["account_id"], viewer_account_id, "goal")
+    if shared_circle:
+        nick = _circle_nickname(conn, row["account_id"], shared_circle)
+        if nick:
+            d["owner_nickname"] = nick
+    d["share_level"] = share
+    if share != "detail":
         d = _trim_summary(d)
+        d["share_level"] = share
     # 圈友视角附带鞭策入口状态（前端当日已用置灰）；不暴露是否被屏蔽
     d["viewer_nudged_today"] = conn.execute(
-        "SELECT 1 FROM nudges WHERE from_user_id = ? AND to_user_id = ? AND substr(created_at, 1, 10) = ?",
-        (viewer_id, row["user_id"], date.today().isoformat()),
+        """SELECT 1 FROM nudges WHERE from_account_id = ? AND to_account_id = ?
+           AND substr(created_at, 1, 10) = ?""",
+        (viewer_account_id, row["account_id"], date.today().isoformat()),
     ).fetchone() is not None
     return d
 
 
-def list_goals(user_id: str) -> dict:
+def list_goals(account_id: str) -> dict:
     """我的目标列表（owner 视角全量）；存款目标顺带做月底结算懒检查。"""
     conn = get_conn()
-    _require_user(conn, user_id)
+    selfshare.require_account(conn, account_id)
     rows = conn.execute(
-        "SELECT * FROM goals WHERE user_id = ? ORDER BY created_at DESC", (user_id,)
+        "SELECT * FROM goals WHERE account_id = ? ORDER BY created_at DESC", (account_id,)
     ).fetchall()
     for row in rows:
         _maybe_settle(conn, row)
     rows = conn.execute(
-        "SELECT * FROM goals WHERE user_id = ? ORDER BY created_at DESC", (user_id,)
+        "SELECT * FROM goals WHERE account_id = ? ORDER BY created_at DESC", (account_id,)
     ).fetchall()
     return {"goals": [_to_dict(conn, r) for r in rows]}
 
 
-def list_circle_goals(circle_id: str, viewer_id: str) -> dict:
-    """Wall「伙伴目标」：本圈内公开的目标（owner 与 viewer 均须为本圈成员），恒按 summary 粒度。"""
+def list_circle_goals(circle_id: str, viewer_account_id: str) -> dict:
+    """本圈内共享出来的目标列表：viewer 须为本圈成员；按 self_sharing 档位裁剪。
+
+    朋友任务聚合接口（/api/circles/{id}/friend-tasks）之外的轻量列表形态，同一份过滤逻辑。
+    """
     conn = get_conn()
     if conn.execute(
-        "SELECT 1 FROM users WHERE id = ? AND circle_id = ?", (viewer_id, circle_id)
+        "SELECT 1 FROM memberships WHERE account_id = ? AND circle_id = ?",
+        (viewer_account_id, circle_id),
     ).fetchone() is None:
         raise HTTPException(status_code=403, detail="你不是这个圈子的成员")
     rows = conn.execute(
-        """SELECT g.*, u.nickname AS owner_nickname FROM goals g
-           JOIN users u ON u.id = g.user_id AND u.circle_id = ?
+        """SELECT g.*, COALESCE(u.nickname, a.nickname) AS owner_nickname, s.level AS share_level
+           FROM goals g
+           JOIN self_sharing s
+             ON s.account_id = g.account_id AND s.category = 'goal' AND s.circle_id = ?
+           LEFT JOIN memberships m ON m.account_id = g.account_id AND m.circle_id = s.circle_id
+           LEFT JOIN users u ON u.id = m.user_id
+           LEFT JOIN accounts a ON a.id = g.account_id
            WHERE g.status = 'active' ORDER BY g.created_at DESC""",
         (circle_id,),
     ).fetchall()
     out = []
     for row in rows:
-        if circle_id not in json.loads(row["visible_circle_ids"] or "[]"):
-            continue
-        out.append(_trim_summary(_to_dict(conn, row)))
+        d = _to_dict(conn, row)
+        if row["share_level"] != "detail":
+            d = _trim_summary(d)
+        d["share_level"] = row["share_level"]
+        out.append(d)
     return {"goals": out}
 
 
-# ---------- 可见性设置与屏蔽 ----------
+# ---------- 鞭策开关与屏蔽（归属校验全部在 account 级） ----------
 
-def update_sharing(
-    goal_id: str, user_id: str, visible_circle_ids: list[str], detail_level: str
-) -> dict:
-    """更新可见性（受众圈子 + 粒度）：仅 owner；转回私有（空列表）后鞭策入口自然消失。"""
-    conn = get_conn()
-    row = conn.execute("SELECT * FROM goals WHERE id = ?", (goal_id,)).fetchone()
-    if row is None:
-        raise HTTPException(status_code=404, detail="目标不存在")
-    if row["user_id"] != user_id:
-        raise HTTPException(status_code=403, detail="只能改自己的目标")
-    if detail_level not in DETAIL_LEVELS:
-        raise HTTPException(status_code=400, detail="detail_level 只能是 summary 或 detail")
-    circles = _check_circles(conn, user_id, visible_circle_ids)
-    conn.execute(
-        "UPDATE goals SET visible_circle_ids = ?, detail_level = ? WHERE id = ?",
-        (json.dumps(circles, ensure_ascii=False), detail_level, goal_id),
-    )
-    conn.commit()
-    return {"id": goal_id, "visible_circle_ids": circles, "detail_level": detail_level}
-
-
-def set_nudge_enabled(goal_id: str, user_id: str, enabled: bool) -> dict:
+def set_nudge_enabled(goal_id: str, account_id: str, enabled: bool) -> dict:
     """按目标关闭/打开鞭策：仅 owner。"""
     conn = get_conn()
-    row = conn.execute("SELECT user_id FROM goals WHERE id = ?", (goal_id,)).fetchone()
+    row = conn.execute("SELECT account_id FROM goals WHERE id = ?", (goal_id,)).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="目标不存在")
-    if row["user_id"] != user_id:
+    if row["account_id"] != account_id:
         raise HTTPException(status_code=403, detail="只能改自己的目标")
     conn.execute(
         "UPDATE goals SET nudge_enabled = ? WHERE id = ?", (1 if enabled else 0, goal_id)
@@ -358,21 +341,21 @@ def set_nudge_enabled(goal_id: str, user_id: str, enabled: bool) -> dict:
     return {"id": goal_id, "nudge_enabled": bool(enabled)}
 
 
-def block_user(user_id: str, blocked_user_id: str) -> dict:
-    """按人屏蔽鞭策（nudge_blocks）：幂等，重复屏蔽不插重复行。"""
+def block_user(account_id: str, blocked_account_id: str) -> dict:
+    """按人屏蔽鞭策（nudge_blocks，account 级）：幂等，重复屏蔽不插重复行。"""
     conn = get_conn()
-    _require_user(conn, user_id)
-    blocked_user_id = (blocked_user_id or "").strip()
-    if not blocked_user_id or blocked_user_id == user_id:
+    selfshare.require_account(conn, account_id)
+    blocked_account_id = (blocked_account_id or "").strip()
+    if not blocked_account_id or blocked_account_id == account_id:
         raise HTTPException(status_code=400, detail="屏蔽对象不合法")
     if conn.execute(
-        "SELECT 1 FROM nudge_blocks WHERE user_id = ? AND blocked_user_id = ?",
-        (user_id, blocked_user_id),
+        "SELECT 1 FROM nudge_blocks WHERE account_id = ? AND blocked_account_id = ?",
+        (account_id, blocked_account_id),
     ).fetchone() is None:
         conn.execute(
-            "INSERT INTO nudge_blocks (id, user_id, blocked_user_id, created_at)"
+            "INSERT INTO nudge_blocks (id, account_id, blocked_account_id, created_at)"
             " VALUES (?, ?, ?, ?)",
-            (uuid.uuid4().hex[:12], user_id, blocked_user_id, _now()),
+            (uuid.uuid4().hex[:12], account_id, blocked_account_id, _now()),
         )
         conn.commit()
-    return {"status": "blocked", "blocked_user_id": blocked_user_id}
+    return {"status": "blocked", "blocked_account_id": blocked_account_id}

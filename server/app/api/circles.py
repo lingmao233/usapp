@@ -3,6 +3,7 @@ from pydantic import BaseModel
 
 from ..services import circles as svc
 from ..services import memory
+from ..services import selfshare
 
 router = APIRouter(prefix="/api/circles", tags=["circles"])
 
@@ -53,6 +54,15 @@ def get_circle(circle_id: str):
 @router.get("/{circle_id}/members")
 def list_members(circle_id: str):
     return {"members": svc.list_members(circle_id)}
+
+
+@router.get("/{circle_id}/friend-tasks")
+def friend_tasks(circle_id: str, account_id: str):
+    """朋友任务：圈内其他成员共享出来的目标 + 今日计划，按人分组，附鞭策状态。
+
+    只返回已共享类别；level=progress 只给进度不给明细；未共享数据绝不出现在响应里。
+    """
+    return selfshare.friend_tasks(circle_id, account_id)
 
 
 @router.get("/{circle_id}/graph")

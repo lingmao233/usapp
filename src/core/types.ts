@@ -6,6 +6,20 @@ export interface Session {
   nickname: string
   circle_name: string
   invite_code: string
+  /** 账号级字段（账号系统重构后随 session 写入；可选，不破坏 weapp 存量） */
+  account_id?: string
+  username?: string
+  has_password?: boolean
+}
+
+/** 登录态账号信息：auth.register/login/reset 的响应结构；
+ * recovery_code 仅注册/找回时附带，前端必须强制展示一次 */
+export interface AccountInfo {
+  account_id: string
+  username: string
+  nickname: string
+  has_password: boolean
+  recovery_code?: string | null
 }
 
 /** 圈子（人格系统）：persona_custom 非空时优先于 persona_preset，圈与圈独立 */
@@ -172,26 +186,25 @@ export interface PairGraph {
 
 /* ---------------- 个人功能（账号级：目标/计划/记账/热量/鞭策） ---------------- */
 
-/** 目标：账号级一份，与圈子正交；visible_circle_ids 空=私有；viewer 过滤在服务端。
- * params（目标参数）/answers（问卷答案）/framework（规则算出的周期框架）字段随类型而变，
- * 统一按 Record 读取。 */
+/** 目标：账号级一份，与圈子正交，挂在 account_id 上；共享走 self_sharing（类别 × 圈子开关），
+ * viewer 过滤在服务端。params（目标参数）/answers（问卷答案）/framework（规则算出的周期框架）
+ * 字段随类型而变，统一按 Record 读取。 */
 export interface Goal {
   id: string
-  user_id: string
+  account_id: string
   type: "weight_loss" | "savings" | "study" | "custom"
   title: string
   params: Record<string, unknown>
   answers: Record<string, unknown>
   framework: Record<string, unknown>
   status: string
-  visible_circle_ids: string[]
-  detail_level: "summary" | "detail"
   nudge_enabled: boolean
   created_at: string
+  /** viewer 视角附带：共享档位（progress/detail）；owner 视角无此字段 */
+  share_level?: string
   /** 详情/圈内列表可能附带：进度摘要（服务端按 viewer 粒度裁剪后给） */
   progress?: Record<string, unknown>
   /** 圈内列表/viewer 视角的所有者昵称（服务端 SQL 别名 owner_nickname） */
-  user_nickname?: string
   owner_nickname?: string
   /** viewer 视角附带：当日是否已鞭策过 owner（前端据此置灰鞭策按钮） */
   viewer_nudged_today?: boolean
@@ -200,7 +213,7 @@ export interface Goal {
 /** 今日计划条目：goal_id 空=自定义条目；source=adjust 是联动追加的调整条目（前端醒目样式） */
 export interface PlanItem {
   id: string
-  user_id?: string
+  account_id?: string
   goal_id?: string | null
   date: string
   content: string
@@ -220,7 +233,7 @@ export interface TodayPlan {
 /** 记账条目：金额一律 INTEGER 分，展示层换算元 */
 export interface Expense {
   id: string
-  user_id?: string
+  account_id?: string
   amount_fen: number
   category: string
   merchant: string
@@ -250,7 +263,7 @@ export interface ExerciseEquiv {
 /** 热量记录：exercise_equiv 为 MET 换算结果（运动 key → 等效分钟数） */
 export interface CalorieEntry {
   id: string
-  user_id?: string
+  account_id?: string
   total_kcal: number
   items: CalorieItem[]
   exercise_equiv?: Record<string, ExerciseEquiv>
@@ -261,12 +274,10 @@ export interface CalorieEntry {
   created_at: string
 }
 
-/** 鞭策留言：内容仅目标 owner（与发送者）可见，其余圈友不可见 */
+/** 鞭策留言：内容仅目标 owner（与发送者）可见，其余圈友不可见；归属在 account 级 */
 export interface Nudge {
   id: string
-  goal_id: string
-  from_user_id: string
-  to_user_id: string
+  from_account_id: string
   message: string
   created_at: string
   from_nickname?: string
@@ -287,4 +298,56 @@ export interface CalorieDay {
   items: CalorieEntry[]
   consumed_kcal: number
   budget_kcal?: number
+}
+
+/* ---------------- Self 共享与朋友任务（类别 × 圈子开关） ---------------- */
+
+/** 共享类别：goal/plan 带 level 档位（progress/detail）；ledger/calorie 只有开关（level 恒 ''） */
+export type SharingCategory = "goal" | "plan" | "ledger" | "calorie"
+
+/** self_sharing 行：有行=共享，删行=关闭 */
+export interface SharingItem {
+  circle_id: string
+  circle_name: string
+  category: SharingCategory
+  level: string
+}
+
+/** 朋友任务里共享出来的目标：progress 档只给进度摘要；detail 档附 params/answers/framework */
+export interface FriendGoal {
+  id: string
+  type: Goal["type"]
+  title: string
+  status: string
+  nudge_enabled: boolean
+  created_at: string
+  share_level: string
+  progress?: Record<string, unknown>
+  params?: Record<string, unknown>
+  answers?: Record<string, unknown>
+  framework?: Record<string, unknown>
+}
+
+/** 朋友任务里共享出来的今日计划：progress 档只有完成计数；detail 档附条目明细 */
+export interface FriendPlan {
+  date: string
+  today_done: number
+  today_total: number
+  share_level: string
+  items?: { id: string; content: string; kind: string; done: boolean | number }[]
+}
+
+/** 朋友任务成员卡：只出现共享了 goal/plan 任一类别的人；viewer_nudged_today 对人不对目标 */
+export interface FriendMember {
+  account_id: string
+  nickname: string
+  viewer_nudged_today: boolean
+  goals?: FriendGoal[]
+  plan?: FriendPlan
+}
+
+export interface FriendTasksResp {
+  circle_id: string
+  date: string
+  members: FriendMember[]
 }

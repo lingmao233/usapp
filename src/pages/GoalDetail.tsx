@@ -1,14 +1,6 @@
-import { useCallback, useEffect, useState } from "react"
-import { useNavigate, useParams } from "react-router"
-import {
-  api,
-  loadAccountId,
-  type AccountCircle,
-  type Goal,
-  type Nudge,
-  type PlanItem,
-  type Session,
-} from "@/lib/api"
+import { useEffect, useState } from "react"
+import { Link, useNavigate, useParams } from "react-router"
+import { api, type Goal, type Nudge, type PlanItem } from "@/lib/api"
 
 const GOAL_TYPE_LABEL: Record<string, string> = {
   weight_loss: "减肥",
@@ -174,7 +166,7 @@ function SettlementCard({ settlement }: { settlement: Record<string, unknown> })
   )
 }
 
-export default function GoalDetail({ session }: { session: Session }) {
+export default function GoalDetail({ accountId }: { accountId: string }) {
   const { id } = useParams()
   const navigate = useNavigate()
   const [goal, setGoal] = useState<Goal | null>(null)
@@ -183,85 +175,64 @@ export default function GoalDetail({ session }: { session: Session }) {
   const [nudges, setNudges] = useState<Nudge[]>([])
   const [relatedItems, setRelatedItems] = useState<PlanItem[]>([])
   const [blockedSenders, setBlockedSenders] = useState<string[]>([])
-  // 公开设置编辑
-  const [shareOpen, setShareOpen] = useState(false)
-  const [circles, setCircles] = useState<AccountCircle[]>([])
-  const [checked, setChecked] = useState<string[]>([])
-  const [detailLevel, setDetailLevel] = useState<"summary" | "detail">("summary")
+  // 鞭策开关（owner）
   const [nudgeEnabled, setNudgeEnabled] = useState(true)
-  const [shareBusy, setShareBusy] = useState(false)
-  const [shareError, setShareError] = useState("")
+  const [nudgeToggleBusy, setNudgeToggleBusy] = useState(false)
   // viewer 鞭策
   const [nudgeMsg, setNudgeMsg] = useState("")
   const [nudgeBusy, setNudgeBusy] = useState(false)
   const [nudged, setNudged] = useState(false)
   const [nudgeError, setNudgeError] = useState("")
 
-  const isOwner = goal?.user_id === session.user_id
+  const isOwner = goal?.account_id === accountId
 
   useEffect(() => {
     if (!id) return
     api
-      .getGoal(id, session.user_id)
+      .getGoal(id, accountId)
       .then((g) => {
         setGoal(g)
         setLoadState("ok")
-        setChecked(g.visible_circle_ids ?? [])
-        setDetailLevel(g.detail_level === "detail" ? "detail" : "summary")
         setNudgeEnabled(Boolean(g.nudge_enabled))
         // 服务端附带 viewer 当日是否已鞭策（置灰；发送失败 429 兜底）
         setNudged(Boolean(g.viewer_nudged_today))
       })
       .catch(() => setLoadState("error"))
-  }, [id, session.user_id])
+  }, [id, accountId])
 
   // owner：拉鞭策留言 + 今日关联计划条目（独立成败）
   useEffect(() => {
     if (!id || !isOwner) return
     api
-      .listNudges(id, session.user_id)
+      .listNudges(id, accountId)
       .then(setNudges)
       .catch(() => {})
     api
-      .todayPlan(session.user_id)
+      .todayPlan(accountId)
       .then((res) => setRelatedItems(res.items.filter((x) => x.goal_id === id)))
       .catch(() => {})
-  }, [id, isOwner, session.user_id])
+  }, [id, isOwner, accountId])
 
-  // 打开公开设置时拉圈子列表
-  useEffect(() => {
-    if (!shareOpen) return
-    const accountId = loadAccountId()
-    if (!accountId) return
-    api
-      .accountCircles(accountId)
-      .then((res) => setCircles(res.circles))
-      .catch(() => {})
-  }, [shareOpen])
-
-  // 保存公开设置：范围/粒度走 PUT sharing，鞭策开关走 POST nudge-toggle；不猜返回形状，重拉详情
-  const saveSharing = useCallback(async () => {
+  // 鞭策开关（仅 owner）：即时保存；共享范围/粒度请到「个人 → 共享设置」
+  async function handleToggleNudge(enabled: boolean) {
     if (!goal) return
-    setShareBusy(true)
-    setShareError("")
+    setNudgeEnabled(enabled)
+    setNudgeToggleBusy(true)
     try {
-      await api.updateGoalSharing(goal.id, session.user_id, checked, detailLevel)
-      await api.toggleNudge(goal.id, session.user_id, nudgeEnabled)
-      setGoal(await api.getGoal(goal.id, session.user_id))
-      setShareOpen(false)
-    } catch (e) {
-      setShareError(e instanceof Error ? e.message : "保存失败，再试一次")
+      await api.toggleNudge(goal.id, accountId, enabled)
+    } catch {
+      setNudgeEnabled(!enabled) // 失败回滚
     } finally {
-      setShareBusy(false)
+      setNudgeToggleBusy(false)
     }
-  }, [goal, session.user_id, checked, detailLevel, nudgeEnabled])
+  }
 
   async function handleNudge() {
     if (!goal) return
     setNudgeBusy(true)
     setNudgeError("")
     try {
-      await api.sendNudge(goal.id, session.user_id, nudgeMsg.trim())
+      await api.sendNudge(goal.id, accountId, nudgeMsg.trim())
       setNudged(true)
       setNudgeMsg("")
     } catch (e) {
@@ -274,11 +245,11 @@ export default function GoalDetail({ session }: { session: Session }) {
     }
   }
 
-  async function handleBlock(senderId: string) {
+  async function handleBlock(senderAccountId: string) {
     if (!window.confirm("屏蔽后 TA 不能再鞭策你，确定？")) return
     try {
-      await api.blockNudgeUser(session.user_id, senderId)
-      setBlockedSenders((xs) => [...xs, senderId])
+      await api.blockNudgeUser(accountId, senderAccountId)
+      setBlockedSenders((xs) => [...xs, senderAccountId])
     } catch {
       /* 失败保持现状，用户可重试 */
     }
@@ -302,8 +273,8 @@ export default function GoalDetail({ session }: { session: Session }) {
     )
   }
 
-  const ownerName = goal.owner_nickname ?? goal.user_nickname ?? "圈友"
-  const visibleNudges = nudges.filter((n) => !blockedSenders.includes(n.from_user_id))
+  const ownerName = goal.owner_nickname ?? "圈友"
+  const visibleNudges = nudges.filter((n) => !blockedSenders.includes(n.from_account_id))
   const settlement =
     goal.framework && typeof goal.framework.settlement === "object" && goal.framework.settlement
       ? (goal.framework.settlement as Record<string, unknown>)
@@ -329,7 +300,7 @@ export default function GoalDetail({ session }: { session: Session }) {
           {settlement && <SettlementCard settlement={settlement} />}
         </>
       ) : (
-        goal.detail_level === "detail" && <DataCard title="明细" dict={goal.framework} />
+        goal.share_level === "detail" && <DataCard title="明细" dict={goal.framework} />
       )}
 
       {isOwner ? (
@@ -374,7 +345,7 @@ export default function GoalDetail({ session }: { session: Session }) {
                       <span className="text-xs text-stone-400">{timeLabel(n.created_at)}</span>
                       <button
                         className="ml-auto text-xs text-stone-300 hover:text-stone-500"
-                        onClick={() => handleBlock(n.from_user_id)}
+                        onClick={() => handleBlock(n.from_account_id)}
                       >
                         屏蔽 TA
                       </button>
@@ -386,89 +357,26 @@ export default function GoalDetail({ session }: { session: Session }) {
             )}
           </div>
 
-          {/* 公开设置 */}
+          {/* 鞭策开关 + 共享入口提示 */}
           <div className="us-panel rounded-2xl p-5">
-            <div className="flex items-center justify-between">
-              <p className="us-serif text-base">公开设置</p>
-              <button className="us-btn-ghost text-xs" onClick={() => setShareOpen((v) => !v)}>
-                {shareOpen ? "收起" : "编辑"}
-              </button>
-            </div>
-            {!shareOpen && (
-              <p className="text-xs text-stone-500 mt-2 leading-relaxed">
-                {goal.visible_circle_ids.length === 0
-                  ? "当前私有，只有你能看到"
-                  : `已公开给 ${goal.visible_circle_ids.length} 个圈子 · ${
-                      goal.detail_level === "detail" ? "含明细" : "仅进度"
-                    } · 鞭策${goal.nudge_enabled ? "开" : "关"}`}
-              </p>
-            )}
-            {shareOpen && (
-              <div className="mt-4">
-                <p className="text-xs text-stone-500 mb-2">对哪些圈子可见（全不勾=私有）：</p>
-                <div className="flex flex-col gap-2 mb-4">
-                  {circles.map((c) => (
-                    <label
-                      key={c.circle_id}
-                      className="flex items-center gap-2.5 text-sm cursor-pointer"
-                    >
-                      <input
-                        type="checkbox"
-                        className="accent-[#264653] w-4 h-4"
-                        checked={checked.includes(c.circle_id)}
-                        onChange={() =>
-                          setChecked((xs) =>
-                            xs.includes(c.circle_id)
-                              ? xs.filter((x) => x !== c.circle_id)
-                              : [...xs, c.circle_id],
-                          )
-                        }
-                      />
-                      {c.circle_name}
-                    </label>
-                  ))}
-                  {circles.length === 0 && (
-                    <p className="text-xs text-stone-400">圈子列表没拉到，先保存不了公开范围</p>
-                  )}
-                </div>
-                <p className="text-xs text-stone-500 mb-2">公开粒度：</p>
-                <div className="flex gap-2 mb-4">
-                  <button
-                    className={
-                      detailLevel === "summary"
-                        ? "us-chip"
-                        : "us-btn-ghost text-xs border border-[#264653]/15"
-                    }
-                    onClick={() => setDetailLevel("summary")}
-                  >
-                    仅进度
-                  </button>
-                  <button
-                    className={
-                      detailLevel === "detail"
-                        ? "us-chip"
-                        : "us-btn-ghost text-xs border border-[#264653]/15"
-                    }
-                    onClick={() => setDetailLevel("detail")}
-                  >
-                    含明细
-                  </button>
-                </div>
-                <label className="flex items-center gap-2.5 text-sm cursor-pointer mb-4">
-                  <input
-                    type="checkbox"
-                    className="accent-[#264653] w-4 h-4"
-                    checked={nudgeEnabled}
-                    onChange={(e) => setNudgeEnabled(e.target.checked)}
-                  />
-                  允许圈友鞭策我
-                </label>
-                {shareError && <p className="text-sm text-red-700 mb-3">{shareError}</p>}
-                <button className="us-btn" disabled={shareBusy} onClick={saveSharing}>
-                  {shareBusy ? "保存中…" : "保存"}
-                </button>
-              </div>
-            )}
+            <p className="us-serif text-base mb-3">共享与鞭策</p>
+            <label className="flex items-center gap-2.5 text-sm cursor-pointer mb-3">
+              <input
+                type="checkbox"
+                className="accent-[#264653] w-4 h-4"
+                checked={nudgeEnabled}
+                disabled={nudgeToggleBusy}
+                onChange={(e) => handleToggleNudge(e.target.checked)}
+              />
+              允许圈友鞭策我
+            </label>
+            <p className="text-xs text-stone-400 leading-relaxed">
+              共享给哪些圈子、给进度还是明细，统一到
+              <Link to="/account" className="text-[#264653] underline underline-offset-2 mx-1">
+                个人 → 共享设置
+              </Link>
+              按圈子开关。
+            </p>
           </div>
         </>
       ) : (

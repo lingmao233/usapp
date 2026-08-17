@@ -1,12 +1,6 @@
-import { useEffect, useState } from "react"
+import { useState } from "react"
 import { useNavigate } from "react-router"
-import {
-  api,
-  loadAccountId,
-  type AccountCircle,
-  type Goal,
-  type Session,
-} from "@/lib/api"
+import { api, type Goal } from "@/lib/api"
 
 type GoalType = Goal["type"]
 
@@ -88,45 +82,14 @@ const PARAM_KEYS: Record<GoalType, string[]> = {
   custom: ["deadline"],
 }
 
-export default function GoalNew({ session }: { session: Session }) {
+export default function GoalNew({ accountId }: { accountId: string }) {
   const navigate = useNavigate()
   const [step, setStep] = useState(0)
   const [type, setType] = useState<GoalType | null>(null)
   const [title, setTitle] = useState("")
   const [fields, setFields] = useState<Record<string, string>>({})
-  // 可见性：默认私有；公开=勾选若干圈子 + 粒度二选一
-  const [scope, setScope] = useState<"private" | "public">("private")
-  const [circles, setCircles] = useState<AccountCircle[]>([])
-  const [checked, setChecked] = useState<string[]>([])
-  const [detailLevel, setDetailLevel] = useState<"summary" | "detail">("summary")
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
-
-  // 进到可见性步骤时拉"我所在的圈子"列表；拿不到账号则退回当前圈
-  useEffect(() => {
-    if (step !== 2) return
-    const accountId = loadAccountId()
-    if (!accountId) {
-      setCircles([
-        {
-          circle_id: session.circle_id,
-          circle_name: session.circle_name,
-        } as AccountCircle,
-      ])
-      return
-    }
-    api
-      .accountCircles(accountId)
-      .then((res) => setCircles(res.circles))
-      .catch(() =>
-        setCircles([
-          {
-            circle_id: session.circle_id,
-            circle_name: session.circle_name,
-          } as AccountCircle,
-        ]),
-      )
-  }, [step, session.circle_id, session.circle_name])
 
   function pickType(t: GoalType) {
     setType(t)
@@ -162,31 +125,21 @@ export default function GoalNew({ session }: { session: Session }) {
 
   async function handleSubmit() {
     if (!type) return
-    if (scope === "public" && checked.length === 0) {
-      setError("公开的话至少勾一个圈子，或者保持私有")
-      return
-    }
     setBusy(true)
     setError("")
     try {
       const { params, answers } = buildPayload(type)
-      const res = await api.createGoal(session.user_id, {
+      const res = await api.createGoal(accountId, {
         type,
         title: title.trim() || DEFAULT_TITLE[type],
         params,
         answers,
-        visible_circle_ids: scope === "public" ? checked : [],
-        detail_level: detailLevel,
       })
       navigate(`/me/goals/${res.id}`)
     } catch (e) {
       setError(e instanceof Error ? e.message : "创建失败，再试一次")
       setBusy(false)
     }
-  }
-
-  function toggleCircle(id: string) {
-    setChecked((xs) => (xs.includes(id) ? xs.filter((x) => x !== id) : [...xs, id]))
   }
 
   return (
@@ -198,7 +151,6 @@ export default function GoalNew({ session }: { session: Session }) {
       <p className="text-xs text-stone-500 mb-6">
         {step === 0 && "第 1 步：选一个类型"}
         {step === 1 && "第 2 步：答几个小问题"}
-        {step === 2 && "第 3 步：要不要公开给圈子"}
       </p>
 
       {/* 第 1 步：类型四选 */}
@@ -269,96 +221,20 @@ export default function GoalNew({ session }: { session: Session }) {
           {type === "custom" && !title.trim() && (
             <p className="text-xs text-stone-400 mb-3">自定义目标只需要填个名字</p>
           )}
+          {/* 共享不再按目标设置：类别 × 圈子开关统一在「个人 → 共享设置」 */}
+          <p className="text-xs text-stone-400 mb-4 leading-relaxed">
+            目标默认私有。想共享给圈友，请到「个人 → 共享设置」按圈子开关（可选仅进度/明细）。
+          </p>
+          {error && <p className="text-sm text-red-700 mb-3">{error}</p>}
           <div className="flex justify-between">
             <button className="us-btn-ghost" onClick={() => setStep(0)}>
               ← 上一步
             </button>
             <button
               className="us-btn"
-              disabled={type === "custom" && !title.trim()}
-              onClick={() => setStep(2)}
+              disabled={busy || (type === "custom" && !title.trim())}
+              onClick={handleSubmit}
             >
-              下一步
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* 第 3 步：可见性（默认私有） */}
-      {step === 2 && type && (
-        <div className="us-rise">
-          <div className="flex gap-2 mb-5">
-            <button
-              className={scope === "private" ? "us-chip" : "us-btn-ghost text-xs border border-[#264653]/15"}
-              onClick={() => setScope("private")}
-            >
-              🔒 私有（默认）
-            </button>
-            <button
-              className={scope === "public" ? "us-chip" : "us-btn-ghost text-xs border border-[#264653]/15"}
-              onClick={() => setScope("public")}
-            >
-              公开到圈子
-            </button>
-          </div>
-          {scope === "private" ? (
-            <p className="text-sm text-stone-500 leading-relaxed mb-6">
-              只有你自己能看到。之后随时可以在目标详情里改成公开。
-            </p>
-          ) : (
-            <div className="mb-6">
-              <p className="text-xs text-stone-500 mb-2">对哪些圈子可见（没勾的永远看不到）：</p>
-              <div className="flex flex-col gap-2 mb-5">
-                {circles.map((c) => (
-                  <label
-                    key={c.circle_id}
-                    className="flex items-center gap-2.5 text-sm cursor-pointer"
-                  >
-                    <input
-                      type="checkbox"
-                      className="accent-[#264653] w-4 h-4"
-                      checked={checked.includes(c.circle_id)}
-                      onChange={() => toggleCircle(c.circle_id)}
-                    />
-                    {c.circle_name}
-                  </label>
-                ))}
-              </div>
-              <p className="text-xs text-stone-500 mb-2">公开粒度：</p>
-              <div className="flex gap-2">
-                <button
-                  className={
-                    detailLevel === "summary"
-                      ? "us-chip"
-                      : "us-btn-ghost text-xs border border-[#264653]/15"
-                  }
-                  onClick={() => setDetailLevel("summary")}
-                >
-                  仅进度
-                </button>
-                <button
-                  className={
-                    detailLevel === "detail"
-                      ? "us-chip"
-                      : "us-btn-ghost text-xs border border-[#264653]/15"
-                  }
-                  onClick={() => setDetailLevel("detail")}
-                >
-                  含明细
-                </button>
-              </div>
-              <p className="text-xs text-stone-400 mt-2 leading-relaxed">
-                「仅进度」只给圈友看百分比和打卡情况；「含明细」会展示账单金额、体重、热量等具体数字。
-                公开后圈友可以鞭策你（可在详情里关闭）。
-              </p>
-            </div>
-          )}
-          {error && <p className="text-sm text-red-700 mb-3">{error}</p>}
-          <div className="flex justify-between">
-            <button className="us-btn-ghost" onClick={() => setStep(1)}>
-              ← 上一步
-            </button>
-            <button className="us-btn" disabled={busy} onClick={handleSubmit}>
               {busy ? "创建中…" : "创建目标"}
             </button>
           </div>

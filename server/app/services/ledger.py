@@ -1,5 +1,6 @@
 """记账 + 热量：拍照识别（豆包视觉）→ 待确认 → 确认入账；手动录入兜底。
 
+账号级数据（account_id，跨圈唯一一份）。
 - 金额一律 INTEGER 分；识别返回的元在入账时换算；收入记负数账目
   （存款结算口径：实际存入 = 固定收入 + 额外收入 − 支出）
 - 热量确认后同步联动：今日累计超今日预算 → 插/更新今日 adjust 计划条目（幂等）；
@@ -17,7 +18,7 @@ from .. import ai
 from ..ai.prompts import EXPENSE_CATEGORIES
 from ..config import settings
 from ..db.database import get_conn
-from . import rules
+from . import rules, selfshare
 
 MAX_AMOUNT_FEN = 10**12  # 金额 sanity 上限（分，约百亿）
 MAX_KCAL = 20000.0  # 单条热量 sanity 上限
@@ -27,9 +28,8 @@ def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
-def _require_user(conn, user_id: str) -> None:
-    if conn.execute("SELECT 1 FROM users WHERE id = ?", (user_id,)).fetchone() is None:
-        raise HTTPException(status_code=404, detail="用户不存在")
+def _require_account(conn, account_id: str) -> None:
+    selfshare.require_account(conn, account_id)
 
 
 def _image_path(image_url: str) -> Path:
@@ -92,10 +92,10 @@ def _check_kcal(raw) -> float:
 
 # ---------- 记账 ----------
 
-def recognize_expenses(user_id: str, image_url: str) -> dict:
+def recognize_expenses(account_id: str, image_url: str) -> dict:
     """小票/支付截图识别 → 一图多笔 pending 行；未配视觉模型抛 400（手动录入兜底）。"""
     conn = get_conn()
-    _require_user(conn, user_id)
+    _require_account(conn, account_id)
     result = ai.recognize_receipt(str(_image_path(image_url)))
     if result is None:
         raise HTTPException(status_code=400, detail="未配置视觉模型，请手动录入")
@@ -112,12 +112,12 @@ def recognize_expenses(user_id: str, image_url: str) -> dict:
             amount = abs(amount)
         expense_id = uuid.uuid4().hex[:12]
         conn.execute(
-            """INSERT INTO expenses (id, user_id, amount_fen, category, merchant, note, spent_at,
+            """INSERT INTO expenses (id, account_id, amount_fen, category, merchant, note, spent_at,
                source, image_url, status, created_at)
                VALUES (?, ?, ?, ?, ?, '', ?, 'vision', ?, 'pending', ?)""",
             (
                 expense_id,
-                user_id,
+                account_id,
                 amount,
                 _norm_category(raw.get("category")),
                 str(raw.get("merchant") or "").strip()[:50],
@@ -138,7 +138,7 @@ def recognize_expenses(user_id: str, image_url: str) -> dict:
 
 
 def add_expense(
-    user_id: str,
+    account_id: str,
     amount_fen: int | None,
     category: str = "其他",
     merchant: str = "",
@@ -147,7 +147,7 @@ def add_expense(
 ) -> dict:
     """手动记账（现金兜底 / 未配视觉模型的降级路径）：直接 confirmed。收入传负数。"""
     conn = get_conn()
-    _require_user(conn, user_id)
+    _require_account(conn, account_id)
     amount_fen = _check_amount(amount_fen)
     if spent_at:
         spent_at = _norm_time(spent_at)
@@ -155,12 +155,12 @@ def add_expense(
             raise HTTPException(status_code=400, detail="时间格式应为 YYYY-MM-DD 或 YYYY-MM-DD HH:MM")
     expense_id = uuid.uuid4().hex[:12]
     conn.execute(
-        """INSERT INTO expenses (id, user_id, amount_fen, category, merchant, note, spent_at,
+        """INSERT INTO expenses (id, account_id, amount_fen, category, merchant, note, spent_at,
            source, image_url, status, created_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, 'manual', '', 'confirmed', ?)""",
         (
             expense_id,
-            user_id,
+            account_id,
             amount_fen,
             _norm_category(category),
             (merchant or "").strip()[:50],
@@ -173,18 +173,18 @@ def add_expense(
     return {"id": expense_id, "status": "confirmed"}
 
 
-def _get_owned_expense(conn, expense_id: str, user_id: str):
+def _get_owned_expense(conn, expense_id: str, account_id: str):
     row = conn.execute("SELECT * FROM expenses WHERE id = ?", (expense_id,)).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="账目不存在")
-    if row["user_id"] != user_id:
+    if row["account_id"] != account_id:
         raise HTTPException(status_code=403, detail="只能改自己的账目")
     return row
 
 
 def update_expense(
     expense_id: str,
-    user_id: str,
+    account_id: str,
     amount_fen: int | None = None,
     category: str | None = None,
     merchant: str | None = None,
@@ -193,7 +193,7 @@ def update_expense(
 ) -> dict:
     """改账（仅 owner）：金额/分类/商户/备注/时间，传入什么改什么；不动确认状态。"""
     conn = get_conn()
-    row = _get_owned_expense(conn, expense_id, user_id)
+    row = _get_owned_expense(conn, expense_id, account_id)
     fields, values = [], []
     if amount_fen is not None:
         fields.append("amount_fen = ?")
@@ -222,7 +222,7 @@ def update_expense(
 
 def confirm_expense(
     expense_id: str,
-    user_id: str,
+    account_id: str,
     amount_fen: int | None = None,
     category: str | None = None,
     merchant: str | None = None,
@@ -231,34 +231,34 @@ def confirm_expense(
 ) -> dict:
     """待确认 → 入账（可同时改金额/分类等）；已入账的重复确认幂等返回。无同步联动（进度读取时现算）。"""
     conn = get_conn()
-    row = _get_owned_expense(conn, expense_id, user_id)
+    row = _get_owned_expense(conn, expense_id, account_id)
     if row["status"] != "confirmed":
-        update_expense(expense_id, user_id, amount_fen, category, merchant, note, spent_at)
+        update_expense(expense_id, account_id, amount_fen, category, merchant, note, spent_at)
         conn.execute("UPDATE expenses SET status = 'confirmed' WHERE id = ?", (expense_id,))
         conn.commit()
     return {"id": expense_id, "status": "confirmed"}
 
 
-def delete_expense(expense_id: str, user_id: str) -> dict:
+def delete_expense(expense_id: str, account_id: str) -> dict:
     """删账（仅 owner，pending/confirmed 均可删）。"""
     conn = get_conn()
-    _get_owned_expense(conn, expense_id, user_id)
+    _get_owned_expense(conn, expense_id, account_id)
     conn.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))
     conn.commit()
     return {"id": expense_id, "status": "deleted"}
 
 
-def list_expenses(user_id: str, month: str | None = None) -> dict:
+def list_expenses(account_id: str, month: str | None = None) -> dict:
     """月账单：只列已入账（pending 未确认不进账本），附月度支出合计与月可花额度（有存款目标时）。"""
     conn = get_conn()
-    _require_user(conn, user_id)
+    _require_account(conn, account_id)
     month = month or date.today().isoformat()[:7]
     if not re.fullmatch(r"\d{4}-\d{2}", month):
         raise HTTPException(status_code=400, detail="月份格式应为 YYYY-MM")
     rows = conn.execute(
-        """SELECT * FROM expenses WHERE user_id = ? AND status = 'confirmed'
+        """SELECT * FROM expenses WHERE account_id = ? AND status = 'confirmed'
            AND substr(spent_at, 1, 7) = ? ORDER BY spent_at DESC, created_at DESC""",
-        (user_id, month),
+        (account_id, month),
     ).fetchall()
     out = {
         "month": month,
@@ -266,8 +266,8 @@ def list_expenses(user_id: str, month: str | None = None) -> dict:
         "month_total_fen": sum(r["amount_fen"] for r in rows if r["amount_fen"] > 0),
     }
     goal = conn.execute(
-        "SELECT framework FROM goals WHERE user_id = ? AND type = 'savings' AND status = 'active' LIMIT 1",
-        (user_id,),
+        "SELECT framework FROM goals WHERE account_id = ? AND type = 'savings' AND status = 'active' LIMIT 1",
+        (account_id,),
     ).fetchone()
     if goal:
         budget = json.loads(goal["framework"] or "{}").get("monthly_spendable_fen")
@@ -278,10 +278,10 @@ def list_expenses(user_id: str, month: str | None = None) -> dict:
 
 # ---------- 热量 ----------
 
-def _weight_loss_goal(conn, user_id: str):
+def _weight_loss_goal(conn, account_id: str):
     return conn.execute(
-        "SELECT * FROM goals WHERE user_id = ? AND type = 'weight_loss' AND status = 'active' LIMIT 1",
-        (user_id,),
+        "SELECT * FROM goals WHERE account_id = ? AND type = 'weight_loss' AND status = 'active' LIMIT 1",
+        (account_id,),
     ).fetchone()
 
 
@@ -304,13 +304,13 @@ def _calorie_dict(row) -> dict:
     return d
 
 
-def recognize_calorie(user_id: str, image_url: str, hint: str = "") -> dict:
+def recognize_calorie(account_id: str, image_url: str, hint: str = "") -> dict:
     """食物照片识别 → pending 行（菜品明细 + MET 运动等效）；未配视觉模型抛 400。
 
     hint 为拍照时补的一句描述（"红烧肉一碗约 300g"），显著提升准确度。
     """
     conn = get_conn()
-    _require_user(conn, user_id)
+    _require_account(conn, account_id)
     result = ai.recognize_food(str(_image_path(image_url)), hint or "")
     if result is None:
         raise HTTPException(status_code=400, detail="未配置视觉模型，请手动录入")
@@ -328,15 +328,15 @@ def recognize_calorie(user_id: str, image_url: str, hint: str = "") -> dict:
     total = round(sum(i["kcal"] for i in items), 1)
     if not items or total <= 0:
         raise HTTPException(status_code=400, detail="没识别出有效食物，请手动录入")
-    equiv = rules.exercise_equivalents(total, _weight_kg(_weight_loss_goal(conn, user_id)))
+    equiv = rules.exercise_equivalents(total, _weight_kg(_weight_loss_goal(conn, account_id)))
     entry_id = uuid.uuid4().hex[:12]
     conn.execute(
-        """INSERT INTO calorie_entries (id, user_id, total_kcal, items, exercise_equiv, note,
+        """INSERT INTO calorie_entries (id, account_id, total_kcal, items, exercise_equiv, note,
            source, image_url, status, created_at)
            VALUES (?, ?, ?, ?, ?, ?, 'vision', ?, 'pending', ?)""",
         (
             entry_id,
-            user_id,
+            account_id,
             total,
             json.dumps(items, ensure_ascii=False),
             json.dumps(equiv, ensure_ascii=False),
@@ -350,12 +350,12 @@ def recognize_calorie(user_id: str, image_url: str, hint: str = "") -> dict:
     return {"entry": _calorie_dict(row)}
 
 
-def _calorie_linkage(conn, user_id: str) -> dict | None:
+def _calorie_linkage(conn, account_id: str) -> dict | None:
     """热量联动（减肥 ↔ 热量）：今日累计超今日预算 → 插/更新今日 adjust 条目（幂等）。
 
     无减肥目标 / 无预算 / 没超 → 返回 None，什么都不发生（已有条目一律不动）。
     """
-    goal = _weight_loss_goal(conn, user_id)
+    goal = _weight_loss_goal(conn, account_id)
     if goal is None:
         return None
     budget = json.loads(goal["framework"] or "{}").get("budget_kcal")
@@ -364,8 +364,8 @@ def _calorie_linkage(conn, user_id: str) -> dict | None:
     day = date.today().isoformat()
     consumed = conn.execute(
         """SELECT COALESCE(SUM(total_kcal), 0) AS s FROM calorie_entries
-           WHERE user_id = ? AND status = 'confirmed' AND substr(created_at, 1, 10) = ?""",
-        (user_id, day),
+           WHERE account_id = ? AND status = 'confirmed' AND substr(created_at, 1, 10) = ?""",
+        (account_id, day),
     ).fetchone()["s"]
     adj = rules.calorie_adjustment(float(budget), float(consumed), _weight_kg(goal))
     if adj is None:
@@ -373,8 +373,8 @@ def _calorie_linkage(conn, user_id: str) -> dict | None:
     options = " / ".join(f"{v['name']}{v['minutes']}分钟" for v in adj["exercise"].values())
     content = f"今日热量已超预算 {adj['over_kcal']} kcal，运动补偿：{options}"
     existing = conn.execute(
-        "SELECT id FROM plan_items WHERE user_id = ? AND date = ? AND source = 'adjust'",
-        (user_id, day),
+        "SELECT id FROM plan_items WHERE account_id = ? AND date = ? AND source = 'adjust'",
+        (account_id, day),
     ).fetchone()
     if existing:
         conn.execute("UPDATE plan_items SET content = ? WHERE id = ?", (content, existing["id"]))
@@ -382,9 +382,9 @@ def _calorie_linkage(conn, user_id: str) -> dict | None:
     else:
         item_id = uuid.uuid4().hex[:12]
         conn.execute(
-            """INSERT INTO plan_items (id, user_id, goal_id, date, content, kind, source, done, created_at)
+            """INSERT INTO plan_items (id, account_id, goal_id, date, content, kind, source, done, created_at)
                VALUES (?, ?, ?, ?, ?, 'task', 'adjust', 0, ?)""",
-            (item_id, user_id, goal["id"], day, content, _now()),
+            (item_id, account_id, goal["id"], day, content, _now()),
         )
     conn.commit()
     return {
@@ -395,33 +395,33 @@ def _calorie_linkage(conn, user_id: str) -> dict | None:
     }
 
 
-def add_calorie(user_id: str, total_kcal: float | None, note: str = "") -> dict:
+def add_calorie(account_id: str, total_kcal: float | None, note: str = "") -> dict:
     """手动录入热量（数字 + 备注）：直接 confirmed，触发超预算联动。"""
     conn = get_conn()
-    _require_user(conn, user_id)
+    _require_account(conn, account_id)
     kcal = _check_kcal(total_kcal)
-    equiv = rules.exercise_equivalents(kcal, _weight_kg(_weight_loss_goal(conn, user_id)))
+    equiv = rules.exercise_equivalents(kcal, _weight_kg(_weight_loss_goal(conn, account_id)))
     entry_id = uuid.uuid4().hex[:12]
     conn.execute(
-        """INSERT INTO calorie_entries (id, user_id, total_kcal, items, exercise_equiv, note,
+        """INSERT INTO calorie_entries (id, account_id, total_kcal, items, exercise_equiv, note,
            source, image_url, status, created_at)
            VALUES (?, ?, ?, '[]', ?, ?, 'manual', '', 'confirmed', ?)""",
-        (entry_id, user_id, kcal, json.dumps(equiv, ensure_ascii=False), (note or "").strip()[:100], _now()),
+        (entry_id, account_id, kcal, json.dumps(equiv, ensure_ascii=False), (note or "").strip()[:100], _now()),
     )
     conn.commit()
-    adjustment = _calorie_linkage(conn, user_id)
+    adjustment = _calorie_linkage(conn, account_id)
     return {"id": entry_id, "status": "confirmed", "adjustment": adjustment}
 
 
 def confirm_calorie(
-    entry_id: str, user_id: str, total_kcal: float | None = None, note: str | None = None
+    entry_id: str, account_id: str, total_kcal: float | None = None, note: str | None = None
 ) -> dict:
     """待确认 → 入账（数字可改，改了重算运动等效）；确认后触发超预算联动。重复确认幂等。"""
     conn = get_conn()
     row = conn.execute("SELECT * FROM calorie_entries WHERE id = ?", (entry_id,)).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="记录不存在")
-    if row["user_id"] != user_id:
+    if row["account_id"] != account_id:
         raise HTTPException(status_code=403, detail="只能改自己的记录")
     if row["status"] != "confirmed":
         fields = ["status = 'confirmed'"]
@@ -433,7 +433,7 @@ def confirm_calorie(
             fields.append("exercise_equiv = ?")
             values.append(
                 json.dumps(
-                    rules.exercise_equivalents(kcal, _weight_kg(_weight_loss_goal(conn, user_id))),
+                    rules.exercise_equivalents(kcal, _weight_kg(_weight_loss_goal(conn, account_id))),
                     ensure_ascii=False,
                 )
             )
@@ -443,28 +443,28 @@ def confirm_calorie(
         values.append(entry_id)
         conn.execute(f"UPDATE calorie_entries SET {', '.join(fields)} WHERE id = ?", values)
         conn.commit()
-    adjustment = _calorie_linkage(conn, user_id)
+    adjustment = _calorie_linkage(conn, account_id)
     return {"id": entry_id, "status": "confirmed", "adjustment": adjustment}
 
 
-def list_calories(user_id: str, day: str | None = None) -> dict:
+def list_calories(account_id: str, day: str | None = None) -> dict:
     """某日热量：已入账记录 + 当日累计 + 今日预算（有减肥目标时）。"""
     conn = get_conn()
-    _require_user(conn, user_id)
+    _require_account(conn, account_id)
     day = day or date.today().isoformat()
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
         raise HTTPException(status_code=400, detail="日期格式应为 YYYY-MM-DD")
     rows = conn.execute(
-        """SELECT * FROM calorie_entries WHERE user_id = ? AND status = 'confirmed'
+        """SELECT * FROM calorie_entries WHERE account_id = ? AND status = 'confirmed'
            AND substr(created_at, 1, 10) = ? ORDER BY created_at, rowid""",
-        (user_id, day),
+        (account_id, day),
     ).fetchall()
     out = {
         "date": day,
         "items": [_calorie_dict(r) for r in rows],
         "consumed_kcal": round(sum(r["total_kcal"] for r in rows), 1),
     }
-    goal = _weight_loss_goal(conn, user_id)
+    goal = _weight_loss_goal(conn, account_id)
     if goal:
         budget = json.loads(goal["framework"] or "{}").get("budget_kcal")
         if budget:

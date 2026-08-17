@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react"
-import { api, type Expense, type Session } from "@/lib/api"
+import { api, type Expense } from "@/lib/api"
 import ImagePicker, { type PickedImage } from "@/components/ImagePicker"
 
 /** 预设类目，与服务端 EXPENSE_CATEGORIES 一致（不认得的会被服务端归「其他」） */
@@ -47,7 +47,7 @@ interface PendingExpense {
   spent_at: string
 }
 
-export default function Ledger({ session }: { session: Session }) {
+export default function Ledger({ accountId }: { accountId: string }) {
   const [month, setMonth] = useState(monthOf(todayLocal()))
   const [expenses, setExpenses] = useState<Expense[]>([])
   const [totalFen, setTotalFen] = useState(0)
@@ -70,7 +70,7 @@ export default function Ledger({ session }: { session: Session }) {
 
   const load = useCallback(async () => {
     try {
-      const res = await api.listExpenses(session.user_id, month)
+      const res = await api.listExpenses(accountId, month)
       setExpenses(res.items)
       setTotalFen(res.month_total_fen)
       setBudgetFen(res.monthly_spendable_fen ?? null)
@@ -78,7 +78,7 @@ export default function Ledger({ session }: { session: Session }) {
       /* 静默，保持现状 */
     }
     setLoaded(true)
-  }, [session.user_id, month])
+  }, [accountId, month])
 
   useEffect(() => {
     setLoaded(false)
@@ -91,7 +91,7 @@ export default function Ledger({ session }: { session: Session }) {
     setRecError("")
     try {
       const url = (await api.uploadImage(image.original, image.display)).url
-      const list = await api.recognizeReceipt(session.user_id, url)
+      const list = await api.recognizeReceipt(accountId, url)
       const today = todayLocal()
       setPending(
         list.map((e) => ({
@@ -140,7 +140,7 @@ export default function Ledger({ session }: { session: Session }) {
     setSubmitError("")
     try {
       for (const p of chosen) {
-        await api.confirmExpense(p.id, session.user_id, {
+        await api.confirmExpense(p.id, accountId, {
           amount_fen: yuanToFen(p.amount),
           category: p.category,
           merchant: p.merchant.trim(),
@@ -149,7 +149,7 @@ export default function Ledger({ session }: { session: Session }) {
         })
       }
       for (const p of dropped) {
-        await api.deleteExpense(p.id, session.user_id).catch(() => {})
+        await api.deleteExpense(p.id, accountId).catch(() => {})
       }
       setPending([])
       await load()
@@ -165,7 +165,7 @@ export default function Ledger({ session }: { session: Session }) {
     const ids = pending.map((p) => p.id)
     setPending([])
     for (const id of ids) {
-      await api.deleteExpense(id, session.user_id).catch(() => {})
+      await api.deleteExpense(id, accountId).catch(() => {})
     }
   }
 
@@ -178,7 +178,7 @@ export default function Ledger({ session }: { session: Session }) {
     setManualBusy(true)
     setSubmitError("")
     try {
-      await api.addExpense(session.user_id, {
+      await api.addExpense(accountId, {
         amount_fen: fen,
         category: mCategory,
         merchant: mMerchant.trim(),
@@ -200,7 +200,7 @@ export default function Ledger({ session }: { session: Session }) {
 
   async function handleDelete(e: Expense) {
     try {
-      await api.deleteExpense(e.id, session.user_id)
+      await api.deleteExpense(e.id, accountId)
       setExpenses((xs) => xs.filter((x) => x.id !== e.id))
     } catch {
       /* 失败保持现状，用户可重试 */

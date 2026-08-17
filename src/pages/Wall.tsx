@@ -330,7 +330,7 @@ function ReportView({ reportId, onBack }: { reportId: string; onBack: () => void
   )
 }
 
-export default function Wall({ session }: { session: Session }) {
+export default function Wall({ session, accountId }: { session: Session; accountId: string }) {
   const navigate = useNavigate()
   const [fragments, setFragments] = useState<Fragment[]>([])
   const [buddyGoals, setBuddyGoals] = useState<Goal[]>([])
@@ -423,13 +423,13 @@ export default function Wall({ session }: { session: Session }) {
       .catch(() => {})
   }, [session.circle_id])
 
-  // 「伙伴目标」：本圈内公开的目标（不含自己的；服务端已按可见性过滤），空则不渲染整块
+  // 「伙伴目标」：本圈内共享出来的目标（不含自己的；服务端已按 self_sharing 档位过滤），空则不渲染整块
   useEffect(() => {
     api
-      .circleGoals(session.circle_id, session.user_id)
-      .then((gs) => setBuddyGoals(gs.filter((g) => g.user_id !== session.user_id)))
+      .circleGoals(session.circle_id, accountId)
+      .then((gs) => setBuddyGoals(gs.filter((g) => g.account_id !== accountId)))
       .catch(() => {})
-  }, [session.circle_id, session.user_id])
+  }, [session.circle_id, accountId])
 
   useEffect(() => {
     loadFragments()
@@ -512,7 +512,7 @@ export default function Wall({ session }: { session: Session }) {
                 >
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-medium text-[#264653]">
-                      {g.user_nickname ?? g.owner_nickname ?? "圈友"}
+                      {g.owner_nickname ?? "圈友"}
                     </span>
                     <span className="us-chip">{GOAL_TYPE_LABEL[g.type] ?? "目标"}</span>
                   </div>

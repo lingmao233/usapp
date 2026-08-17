@@ -39,12 +39,16 @@ def _db() -> sqlite3.Connection:
 
 
 def _new_user(client: TestClient, name: str = "计划测试圈") -> str:
-    """建圈（带昵称即建 account）拿一个干净 user_id。"""
-    return client.post("/api/circles", json={"name": name, "nickname": "阿澈"}).json()["user_id"]
+    """注册账号并建圈，返回 account_id（Self 数据全部挂在账号级）。"""
+    acc = client.post(
+        "/api/auth/register", json={"username": f"u-{uuid.uuid4().hex[:8]}"}
+    ).json()["account_id"]
+    client.post("/api/circles", json={"name": name, "account_id": acc, "nickname": "阿澈"})
+    return acc
 
 
-def _create_goal(client: TestClient, user_id: str, **over) -> str:
-    body = {"user_id": user_id, "type": "custom", "title": "目标", "params": {}, "answers": {}}
+def _create_goal(client: TestClient, account_id: str, **over) -> str:
+    body = {"account_id": account_id, "type": "custom", "title": "目标", "params": {}, "answers": {}}
     body.update(over)
     r = client.post("/api/goals", json=body)
     assert r.status_code == 200, r.text
@@ -57,17 +61,17 @@ def test_today_lazy_generation_converges(client: TestClient) -> None:
     """首次拉取 generating=trigger（路由改写 True）→ 背景任务收敛出 mock 条目 → 再拉不重复生成。"""
     uid = _new_user(client)
     # 无目标：不触发，空清单
-    r = client.get("/api/plans/today", params={"user_id": uid})
+    r = client.get("/api/plans/today", params={"account_id": uid})
     assert r.status_code == 200 and r.json()["generating"] is False and r.json()["items"] == []
 
     _create_goal(client, uid, type="study", title="考研英语", answers={"daily_minutes": 45})
 
     # 有 active 目标且无 AI 条目 → 触发懒生成；TestClient 内联跑完 BackgroundTasks
-    r = client.get("/api/plans/today", params={"user_id": uid})
+    r = client.get("/api/plans/today", params={"account_id": uid})
     assert r.json()["generating"] is True and r.json()["items"] == []
 
     # 收敛：mock 桩按 study 模板出 2 条（daily_minutes=45 进文案），source='ai'
-    r = client.get("/api/plans/today", params={"user_id": uid})
+    r = client.get("/api/plans/today", params={"account_id": uid})
     body = r.json()
     assert body["generating"] is False
     contents = [i["content"] for i in body["items"]]
@@ -78,7 +82,7 @@ def test_today_lazy_generation_converges(client: TestClient) -> None:
     assert kinds["专注学习 45 分钟"] == "daily"
 
     # 幂等：已有 AI 条目不再触发，条目数不膨胀
-    r = client.get("/api/plans/today", params={"user_id": uid})
+    r = client.get("/api/plans/today", params={"account_id": uid})
     assert r.json()["generating"] is False and len(r.json()["items"]) == 2
 
 
@@ -98,44 +102,44 @@ def test_item_crud_and_authz(client: TestClient) -> None:
     uid = _new_user(client, "CRUD 圈")
     other = _new_user(client, "CRUD 圈外人")
 
-    r = client.post("/api/plans/items", json={"user_id": uid, "content": "背 50 个单词"})
+    r = client.post("/api/plans/items", json={"account_id": uid, "content": "背 50 个单词"})
     assert r.status_code == 200, r.text
     item_id = r.json()["id"]
 
     # 打勾 + 改内容
-    r = client.put(f"/api/plans/items/{item_id}", json={"user_id": uid, "done": True})
+    r = client.put(f"/api/plans/items/{item_id}", json={"account_id": uid, "done": True})
     assert r.status_code == 200
-    r = client.put(f"/api/plans/items/{item_id}", json={"user_id": uid, "content": "背 80 个单词"})
+    r = client.put(f"/api/plans/items/{item_id}", json={"account_id": uid, "content": "背 80 个单词"})
     assert r.status_code == 200
-    items = client.get("/api/plans/today", params={"user_id": uid}).json()["items"]
+    items = client.get("/api/plans/today", params={"account_id": uid}).json()["items"]
     mine = [i for i in items if i["id"] == item_id]
     assert mine and mine[0]["done"] is True and mine[0]["content"] == "背 80 个单词"
     assert mine[0]["source"] == "custom" and mine[0]["goal_id"] is None
 
     # 越权：改/删别人的条目 403
     assert client.put(
-        f"/api/plans/items/{item_id}", json={"user_id": other, "done": False}).status_code == 403
+        f"/api/plans/items/{item_id}", json={"account_id": other, "done": False}).status_code == 403
     assert client.delete(
-        f"/api/plans/items/{item_id}", params={"user_id": other}).status_code == 403
+        f"/api/plans/items/{item_id}", params={"account_id": other}).status_code == 403
     # 不存在的条目
     assert client.put(
-        "/api/plans/items/ghost", json={"user_id": uid, "done": True}).status_code == 404
+        "/api/plans/items/ghost", json={"account_id": uid, "done": True}).status_code == 404
 
     # 校验：空内容 / 非法 kind / 非法日期 / 关联别人的目标 / 关联不存在的目标
-    assert client.post("/api/plans/items", json={"user_id": uid, "content": "  "}).status_code == 400
+    assert client.post("/api/plans/items", json={"account_id": uid, "content": "  "}).status_code == 400
     assert client.post(
-        "/api/plans/items", json={"user_id": uid, "content": "x", "kind": "weekly"}).status_code == 400
+        "/api/plans/items", json={"account_id": uid, "content": "x", "kind": "weekly"}).status_code == 400
     assert client.post(
-        "/api/plans/items", json={"user_id": uid, "content": "x", "date": "08-16"}).status_code == 400
+        "/api/plans/items", json={"account_id": uid, "content": "x", "date": "08-16"}).status_code == 400
     other_goal = _create_goal(client, other, title="别人的目标")
     assert client.post("/api/plans/items", json={
-        "user_id": uid, "content": "x", "goal_id": other_goal}).status_code == 403
+        "account_id": uid, "content": "x", "goal_id": other_goal}).status_code == 403
     assert client.post("/api/plans/items", json={
-        "user_id": uid, "content": "x", "goal_id": "ghost"}).status_code == 404
+        "account_id": uid, "content": "x", "goal_id": "ghost"}).status_code == 404
 
     # 删除：owner 删完从清单消失
-    assert client.delete(f"/api/plans/items/{item_id}", params={"user_id": uid}).status_code == 200
-    items = client.get("/api/plans/today", params={"user_id": uid}).json()["items"]
+    assert client.delete(f"/api/plans/items/{item_id}", params={"account_id": uid}).status_code == 200
+    items = client.get("/api/plans/today", params={"account_id": uid}).json()["items"]
     assert all(i["id"] != item_id for i in items)
 
 
@@ -143,9 +147,9 @@ def test_custom_item_without_goal(client: TestClient) -> None:
     """无目标也可用：自定义条目 goal_id 为 NULL；无目标不触发懒生成。"""
     uid = _new_user(client, "无目标圈")
     r = client.post("/api/plans/items", json={
-        "user_id": uid, "content": "给阳台的花浇水", "kind": "habit", "date": date.today().isoformat()})
+        "account_id": uid, "content": "给阳台的花浇水", "kind": "habit", "date": date.today().isoformat()})
     assert r.status_code == 200
-    body = client.get("/api/plans/today", params={"user_id": uid}).json()
+    body = client.get("/api/plans/today", params={"account_id": uid}).json()
     assert body["generating"] is False  # 没有 active 目标
     assert len(body["items"]) == 1
     item = body["items"][0]
@@ -170,7 +174,7 @@ def test_yesterday_unfinished_in_context(client: TestClient, monkeypatch) -> Non
     ]
     for goal_id, content, done in rows:
         conn.execute(
-            """INSERT INTO plan_items (id, user_id, goal_id, date, content, kind, source, done, created_at)
+            """INSERT INTO plan_items (id, account_id, goal_id, date, content, kind, source, done, created_at)
                VALUES (?, ?, ?, ?, ?, 'task', 'ai', ?, ?)""",
             (uuid.uuid4().hex[:12], uid, goal_id, yesterday, content, done,
              datetime.now().isoformat(timespec="seconds")),

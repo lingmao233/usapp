@@ -3,7 +3,6 @@ import {
   api,
   type CalorieEntry,
   type ExerciseEquiv,
-  type Session,
 } from "@/lib/api"
 import ImagePicker, { type PickedImage } from "@/components/ImagePicker"
 
@@ -30,7 +29,7 @@ interface PendingEntry {
   exercise_equiv: Record<string, ExerciseEquiv>
 }
 
-export default function Calories({ session }: { session: Session }) {
+export default function Calories({ accountId }: { accountId: string }) {
   const today = todayLocal()
   const [entries, setEntries] = useState<CalorieEntry[]>([])
   const [consumed, setConsumed] = useState(0)
@@ -53,7 +52,7 @@ export default function Calories({ session }: { session: Session }) {
 
   const load = useCallback(async () => {
     try {
-      const res = await api.listCalories(session.user_id, today)
+      const res = await api.listCalories(accountId, today)
       setEntries(res.items)
       setConsumed(Math.round(res.consumed_kcal))
       setBudget(res.budget_kcal ?? null)
@@ -61,7 +60,7 @@ export default function Calories({ session }: { session: Session }) {
       /* 静默，保持现状 */
     }
     setLoaded(true)
-  }, [session.user_id, today])
+  }, [accountId, today])
 
   useEffect(() => {
     load()
@@ -73,7 +72,7 @@ export default function Calories({ session }: { session: Session }) {
     setRecError("")
     try {
       const url = (await api.uploadImage(image.original, image.display)).url
-      const entry = await api.recognizeFood(session.user_id, url, hint.trim() || undefined)
+      const entry = await api.recognizeFood(accountId, url, hint.trim() || undefined)
       setPending({
         id: entry.id,
         items: (entry.items ?? []).map((x) => ({ name: x.name, kcal: x.kcal })),
@@ -107,7 +106,7 @@ export default function Calories({ session }: { session: Session }) {
     setConfirmBusy(true)
     setSubmitError("")
     try {
-      const res = await api.confirmCalorie(pending.id, session.user_id, Math.round(total), pending.note)
+      const res = await api.confirmCalorie(pending.id, accountId, Math.round(total), pending.note)
       setAdjustNotice(res.adjustment?.content ?? "")
       setPending(null)
       setHint("")
@@ -133,7 +132,7 @@ export default function Calories({ session }: { session: Session }) {
     setManualBusy(true)
     setSubmitError("")
     try {
-      const res = await api.addCalorie(session.user_id, Math.round(kcal), mNote.trim())
+      const res = await api.addCalorie(accountId, Math.round(kcal), mNote.trim())
       setAdjustNotice(res.adjustment?.content ?? "")
       setMKcal("")
       setMNote("")

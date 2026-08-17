@@ -23,8 +23,10 @@ CREATE TABLE IF NOT EXISTS circles (
 CREATE TABLE IF NOT EXISTS accounts (
     id TEXT PRIMARY KEY,
     nickname TEXT NOT NULL,
+    username TEXT,               -- 全局唯一（大小写不敏感）；NULL=旧接口自动建的账号，不可登录
+    password_hash TEXT,          -- 可空，NULL/空串=无密码账号（只校验用户名）
     created_at TEXT NOT NULL,
-    recovery_code TEXT
+    recovery_code TEXT           -- 找回凭证：仅用于忘密码时重设密码
 );
 
 CREATE TABLE IF NOT EXISTS memberships (
@@ -200,18 +202,17 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     created_at TEXT NOT NULL
 );
 
--- 个人功能（目标/计划/记账/热量/鞭策）：账号级数据，与圈子正交，可见性由服务端过滤
+-- 个人功能（目标/计划/记账/热量/鞭策）：账号级数据（account_id），跨圈唯一一份，
+-- 与圈子正交；可见性由 self_sharing（类别 × 圈子开关）驱动，过滤全在服务端
 CREATE TABLE IF NOT EXISTS goals (
     id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
+    account_id TEXT NOT NULL REFERENCES accounts(id),
     type TEXT NOT NULL,                           -- weight_loss/savings/study/custom
     title TEXT NOT NULL,
     params TEXT NOT NULL DEFAULT '{}',            -- 目标参数(目标体重/总额/截止日期等)
     answers TEXT NOT NULL DEFAULT '{}',           -- 问卷答案
     framework TEXT NOT NULL DEFAULT '{}',         -- 规则算出的周期框架(热量预算/月预算等)
     status TEXT NOT NULL DEFAULT 'active',        -- active/done/abandoned
-    visible_circle_ids TEXT NOT NULL DEFAULT '[]',-- 空=私有
-    detail_level TEXT NOT NULL DEFAULT 'summary', -- summary/detail
     nudge_enabled INTEGER NOT NULL DEFAULT 1,
     last_settled_month TEXT NOT NULL DEFAULT '',  -- 存款滚雪球结算游标 'YYYY-MM'
     created_at TEXT NOT NULL
@@ -219,7 +220,7 @@ CREATE TABLE IF NOT EXISTS goals (
 
 CREATE TABLE IF NOT EXISTS plan_items (
     id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
+    account_id TEXT NOT NULL REFERENCES accounts(id),
     goal_id TEXT,                                 -- 可空=自定义条目
     date TEXT NOT NULL,                           -- 'YYYY-MM-DD'
     content TEXT NOT NULL,
@@ -231,7 +232,7 @@ CREATE TABLE IF NOT EXISTS plan_items (
 
 CREATE TABLE IF NOT EXISTS expenses (
     id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
+    account_id TEXT NOT NULL REFERENCES accounts(id),
     amount_fen INTEGER NOT NULL,                  -- 分；负数=收入
     category TEXT NOT NULL,
     merchant TEXT NOT NULL DEFAULT '',
@@ -245,7 +246,7 @@ CREATE TABLE IF NOT EXISTS expenses (
 
 CREATE TABLE IF NOT EXISTS calorie_entries (
     id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
+    account_id TEXT NOT NULL REFERENCES accounts(id),
     total_kcal REAL NOT NULL,
     items TEXT NOT NULL DEFAULT '[]',             -- 菜品明细 JSON
     exercise_equiv TEXT NOT NULL DEFAULT '{}',    -- MET 换算结果
@@ -259,17 +260,28 @@ CREATE TABLE IF NOT EXISTS calorie_entries (
 CREATE TABLE IF NOT EXISTS nudges (
     id TEXT PRIMARY KEY,
     goal_id TEXT NOT NULL,
-    from_user_id TEXT NOT NULL,
-    to_user_id TEXT NOT NULL,
+    from_account_id TEXT NOT NULL,
+    to_account_id TEXT NOT NULL,
     message TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS nudge_blocks (
     id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
-    blocked_user_id TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    blocked_account_id TEXT NOT NULL,
     created_at TEXT NOT NULL
+);
+
+-- Self 共享：类别 × 圈子开关。level 仅 goal/plan 用（progress/detail），
+-- ledger/calorie 只有开关无档位（level 恒 ''）；有行=共享，删行=关闭
+CREATE TABLE IF NOT EXISTS self_sharing (
+    account_id TEXT NOT NULL REFERENCES accounts(id),
+    circle_id TEXT NOT NULL REFERENCES circles(id),
+    category TEXT NOT NULL,                       -- goal/plan/ledger/calorie
+    level TEXT NOT NULL DEFAULT '',               -- progress/detail/''
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, circle_id, category)
 );
 """
 
@@ -293,6 +305,8 @@ def get_conn() -> sqlite3.Connection:
 def init_db() -> None:
     get_conn().executescript(SCHEMA)
     _migrate_accounts_recovery_code()
+    _migrate_accounts_auth()
+    _migrate_self_tables_account()
     _migrate_fragments_visibility()
     _migrate_wishes_visibility()
     _migrate_pair_secret_common_wishes()
@@ -340,6 +354,40 @@ def _migrate_accounts_recovery_code() -> None:
             "UPDATE accounts SET recovery_code = ? WHERE id = ?",
             (generate_recovery_code(), row["id"]),
         )
+
+
+def _migrate_accounts_auth() -> None:
+    """存量迁移：老库 accounts 无 username / password_hash 列时补列（账号系统重构）。
+
+    老账号 username 为 NULL（不可登录，需重新注册）；密码 NULL=无密码账号。
+    """
+    conn = get_conn()
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(accounts)").fetchall()]
+    if not cols:
+        return
+    if "username" not in cols:
+        conn.execute("ALTER TABLE accounts ADD COLUMN username TEXT")
+    if "password_hash" not in cols:
+        conn.execute("ALTER TABLE accounts ADD COLUMN password_hash TEXT")
+    # 唯一索引在列就绪后建（SQLite 唯一索引允许多个 NULL）
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_username ON accounts(username)"
+    )
+
+
+def _migrate_self_tables_account() -> None:
+    """schema 重建（账号系统重构）：self 六表从 user_id（每圈身份）改为 account_id 归属。
+
+    测试数据全清、不做存量迁移：老库检测到旧列结构直接 DROP 重建（幂等）。
+    """
+    conn = get_conn()
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(goals)").fetchall()]
+    if cols and "account_id" not in cols:
+        for table in (
+            "nudge_blocks", "nudges", "calorie_entries", "expenses", "plan_items", "goals",
+        ):
+            conn.execute(f"DROP TABLE IF EXISTS {table}")
+        conn.executescript(SCHEMA)  # 重建（全部 CREATE IF NOT EXISTS，幂等）
 
 
 def _migrate_fragments_visibility() -> None:
@@ -416,7 +464,7 @@ def _migrate_wishes_matched_status() -> None:
 def reset_db() -> None:
     """仅测试用：清空全部数据。"""
     conn = get_conn()
-    for table in ("nudge_blocks", "nudges", "calorie_entries", "expenses", "plan_items", "goals", "chat_messages", "chat_threads", "common_wishes_cache", "pair_relationships", "user_profiles", "task_runs", "reports", "wishes", "comments", "likes", "push_subscriptions", "knowledge_items", "fragments", "memberships", "users", "circles", "accounts"):
+    for table in ("self_sharing", "nudge_blocks", "nudges", "calorie_entries", "expenses", "plan_items", "goals", "chat_messages", "chat_threads", "common_wishes_cache", "pair_relationships", "user_profiles", "task_runs", "reports", "wishes", "comments", "likes", "push_subscriptions", "knowledge_items", "fragments", "memberships", "users", "circles", "accounts"):
         conn.execute(f"DELETE FROM {table}")
     conn.commit()
 

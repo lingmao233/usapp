@@ -170,21 +170,40 @@ def notify_like(fragment_id: str, actor_id: str) -> None:
     run_task("push_like", fragment_id, lambda: _send_to_user(frag["user_id"], payload))
 
 
-def notify_nudge(goal_id: str, from_user_id: str, message: str) -> None:
-    """新鞭策 → 推给目标所有者（限频/屏蔽已在 nudges 层校验过）；留言摘要进 body（同评论 30 字口径）。"""
-    goal = get_conn().execute(
-        "SELECT user_id, title FROM goals WHERE id = ?", (goal_id,)
+def _account_nickname(account_id: str) -> str:
+    row = get_conn().execute(
+        "SELECT nickname FROM accounts WHERE id = ?", (account_id,)
     ).fetchone()
-    if goal is None or goal["user_id"] == from_user_id:
+    return row["nickname"] if row else "有人"
+
+
+def notify_nudge(goal_id: str, from_account_id: str, message: str) -> None:
+    """新鞭策 → 推给目标所有者（限频/屏蔽已在 nudges 层校验过）；留言摘要进 body（同评论 30 字口径）。
+
+    目标归属在 account 级：订阅按每圈身份（users）存，向该账号名下所有身份发。
+    """
+    conn = get_conn()
+    goal = conn.execute(
+        "SELECT account_id, title FROM goals WHERE id = ?", (goal_id,)
+    ).fetchone()
+    if goal is None or goal["account_id"] == from_account_id:
         return
     snippet = message.strip()[:30]
+    name = _account_nickname(from_account_id)
     if snippet:
-        body = f"{_nickname(from_user_id)} 鞭策了你：{snippet}"
+        body = f"{name} 鞭策了你：{snippet}"
     else:
-        body = f"{_nickname(from_user_id)} 鞭策了你的「{goal['title'][:20]}」"
+        body = f"{name} 鞭策了你的「{goal['title'][:20]}」"
     payload = {
         "title": "我们",
         "body": body,
         "url": "/me",
     }
-    run_task("push_nudge", goal_id, lambda: _send_to_user(goal["user_id"], payload))
+    user_ids = [
+        r["user_id"]
+        for r in conn.execute(
+            "SELECT user_id FROM memberships WHERE account_id = ?", (goal["account_id"],)
+        ).fetchall()
+    ]
+    for uid in user_ids:
+        run_task("push_nudge", goal_id, lambda uid=uid: _send_to_user(uid, payload))

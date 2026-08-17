@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException
 
 from . import ai
-from .api import accounts, chat, circles, fragments, goals, knowledge, ledger, plans, push, reports, uploads, wishes
+from .api import accounts, auth, chat, circles, fragments, goals, knowledge, ledger, plans, push, reports, self as self_api, uploads, wishes
 from .db.database import init_db
 
 logging.basicConfig(
@@ -30,6 +30,8 @@ app.add_middleware(
 )
 
 app.include_router(accounts.router)
+app.include_router(auth.router)
+app.include_router(self_api.router)
 app.include_router(circles.router)
 app.include_router(fragments.router)
 app.include_router(knowledge.router)
