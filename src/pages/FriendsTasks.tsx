@@ -83,28 +83,37 @@ function FriendGoalRow({ goal }: { goal: FriendGoal }) {
   return <div className="bg-white/50 rounded-xl px-4 py-3">{inner}</div>
 }
 
-/** 成员卡：目标列表 + 今日计划 + 鞭策（对人一天一次，服务端 429 兜底） */
+/** 成员卡：目标列表 + 今日计划 + 鞭策（对人一天一次，目标/计划合并限频，服务端 429 兜底） */
 function MemberCard({
   member,
   myAccountId,
+  circleId,
   onNudged,
 }: {
   member: FriendMember
   myAccountId: string
+  circleId: string
   onNudged: (accountId: string) => void
 }) {
   const [msg, setMsg] = useState("")
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
-  // 鞭策挂在目标上：取第一个共享目标；只共享计划没共享目标时没有鞭策入口
+  // 目标鞭策挂在第一个共享目标上；计划鞭策挂当天（两者都有时给极简切换，默认目标）
   const nudgeGoal = member.goals?.find((g) => g.nudge_enabled) ?? member.goals?.[0]
+  const canNudgeGoal = Boolean(nudgeGoal)
+  const canNudgePlan = Boolean(member.plan)
+  const [mode, setMode] = useState<"goal" | "plan">(canNudgeGoal ? "goal" : "plan")
 
   async function handleNudge() {
-    if (!nudgeGoal) return
     setBusy(true)
     setError("")
     try {
-      await api.sendNudge(nudgeGoal.id, myAccountId, msg.trim())
+      if (mode === "plan") {
+        await api.sendPlanNudge(myAccountId, member.account_id, circleId, msg.trim())
+      } else {
+        if (!nudgeGoal) return
+        await api.sendNudge(nudgeGoal.id, myAccountId, msg.trim())
+      }
       setMsg("")
       onNudged(member.account_id)
     } catch (e) {
@@ -172,10 +181,32 @@ function MemberCard({
         </div>
       )}
 
-      {/* 鞭策：当日已鞭策置灰；目标关了鞭策则提示 */}
-      {nudgeGoal && !member.viewer_nudged_today && (
+      {/* 鞭策：当日已鞭策置灰；目标关了鞭策则提示（计划鞭策无开关，屏蔽管理维持目标侧） */}
+      {(canNudgeGoal || canNudgePlan) && !member.viewer_nudged_today && (
         <div>
-          {nudgeGoal.nudge_enabled ? (
+          {canNudgeGoal && canNudgePlan && (
+            <div className="flex gap-2 mb-3">
+              {(
+                [
+                  { key: "goal", label: "目标" },
+                  { key: "plan", label: "计划" },
+                ] as const
+              ).map((c) => (
+                <button
+                  key={c.key}
+                  className={`rounded-full px-3 py-1 text-xs leading-5 transition-colors ${
+                    mode === c.key
+                      ? "bg-[#264653] text-white"
+                      : "bg-[#264653]/10 text-[#264653] hover:bg-[#264653]/20"
+                  }`}
+                  onClick={() => setMode(c.key)}
+                >
+                  {c.label}
+                </button>
+              ))}
+            </div>
+          )}
+          {mode === "plan" || nudgeGoal?.nudge_enabled ? (
             <div className="flex gap-2 items-center">
               <input
                 className="us-input flex-1"
@@ -247,6 +278,7 @@ export default function FriendsTasks({ session }: { session: Session }) {
             key={m.account_id}
             member={m}
             myAccountId={accountId}
+            circleId={session.circle_id}
             onNudged={handleNudged}
           />
         ))}

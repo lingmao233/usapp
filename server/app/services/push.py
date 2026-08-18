@@ -207,3 +207,32 @@ def notify_nudge(goal_id: str, from_account_id: str, message: str) -> None:
     ]
     for uid in user_ids:
         run_task("push_nudge", goal_id, lambda uid=uid: _send_to_user(uid, payload))
+
+
+def notify_plan_nudge(to_account_id: str, from_account_id: str, message: str) -> None:
+    """每日计划鞭策 → 推给计划所有者（限频/屏蔽已在 nudges 层校验过）；文案注明是每日计划鞭策。
+
+    与目标鞭策同口径：订阅按每圈身份（users）存，向该账号名下所有身份发。
+    """
+    if to_account_id == from_account_id:
+        return
+    conn = get_conn()
+    snippet = message.strip()[:30]
+    name = _account_nickname(from_account_id)
+    if snippet:
+        body = f"{name} 鞭策了你的每日计划：{snippet}"
+    else:
+        body = f"{name} 鞭策了你的每日计划"
+    payload = {
+        "title": "我们",
+        "body": body,
+        "url": "/me",
+    }
+    user_ids = [
+        r["user_id"]
+        for r in conn.execute(
+            "SELECT user_id FROM memberships WHERE account_id = ?", (to_account_id,)
+        ).fetchall()
+    ]
+    for uid in user_ids:
+        run_task("push_nudge", f"plan:{to_account_id}", lambda uid=uid: _send_to_user(uid, payload))

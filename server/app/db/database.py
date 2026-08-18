@@ -257,9 +257,12 @@ CREATE TABLE IF NOT EXISTS calorie_entries (
     created_at TEXT NOT NULL
 );
 
+-- 鞭策：goal_id 与 plan_date 必居其一——目标鞭策=goal_id 非空/plan_date 空；
+-- 计划鞭策=plan_date='YYYY-MM-DD'（被鞭策的当天）/goal_id 空。限频对人不对类型
 CREATE TABLE IF NOT EXISTS nudges (
     id TEXT PRIMARY KEY,
-    goal_id TEXT NOT NULL,
+    goal_id TEXT,
+    plan_date TEXT,
     from_account_id TEXT NOT NULL,
     to_account_id TEXT NOT NULL,
     message TEXT NOT NULL DEFAULT '',
@@ -314,6 +317,7 @@ def init_db() -> None:
     _migrate_fragments_caption()
     _migrate_circles_persona()
     _migrate_wishes_matched_status()
+    _migrate_nudges_plan_date()
     get_conn().commit()
 
 
@@ -459,6 +463,35 @@ def _migrate_wishes_matched_status() -> None:
     """数据迁移：matched 语义下线（生成方案不再改状态，完成与否只由用户勾选决定），
     存量 matched 愿望迁回 active 重新进入共同愿望匹配池。幂等，每次启动跑无负担。"""
     get_conn().execute("UPDATE wishes SET status='active' WHERE status='matched'")
+
+
+def _migrate_nudges_plan_date() -> None:
+    """存量迁移（今日计划鞭策）：nudges 加 plan_date 列、goal_id 放宽为可空。
+
+    SQLite 不能改列约束，只能建新表→拷贝→drop→rename；幂等：已有 plan_date 列直接跳过。
+    存量行全部是目标鞭策（goal_id 非空），plan_date 补 NULL。
+    """
+    conn = get_conn()
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(nudges)").fetchall()]
+    if not cols or "plan_date" in cols:
+        return
+    conn.executescript(
+        """
+        CREATE TABLE nudges_new (
+            id TEXT PRIMARY KEY,
+            goal_id TEXT,
+            plan_date TEXT,
+            from_account_id TEXT NOT NULL,
+            to_account_id TEXT NOT NULL,
+            message TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        );
+        INSERT INTO nudges_new (id, goal_id, plan_date, from_account_id, to_account_id, message, created_at)
+            SELECT id, goal_id, NULL, from_account_id, to_account_id, message, created_at FROM nudges;
+        DROP TABLE nudges;
+        ALTER TABLE nudges_new RENAME TO nudges;
+        """
+    )
 
 
 def reset_db() -> None:

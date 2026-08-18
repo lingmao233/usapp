@@ -283,6 +283,16 @@ export interface Nudge {
   from_nickname?: string
 }
 
+/** 计划鞭策留言：仅 owner 本人可查（服务端只查本人收件箱）；plan_date=被鞭策的日期 */
+export interface PlanNudge {
+  id: string
+  from_account_id: string
+  message: string
+  plan_date: string
+  created_at: string
+  from_nickname?: string
+}
+
 /** 月账单响应：只列已入账；monthly_spendable_fen 仅存在存款目标时给 */
 export interface LedgerMonth {
   month: string

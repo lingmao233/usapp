@@ -8,7 +8,7 @@ from fastapi import HTTPException
 
 from ..db.database import get_conn
 from . import goals as goals_svc
-from . import push
+from . import push, selfshare
 
 
 def _now() -> str:
@@ -88,3 +88,87 @@ def list_nudges(goal_id: str, account_id: str) -> dict:
         d.pop("account_nickname", None)
         nudges.append(d)
     return {"count": count, "nudges": nudges}
+
+
+# ---------- 今日计划鞭策 ----------
+
+def send_plan_nudge(from_account_id: str, to_account_id: str, circle_id: str, message: str = "") -> dict:
+    """计划鞭策。校验链：to 存在 → 不能鞭策自己 → 双方都是 circle_id 成员
+    → to 的 plan 类别对 from 可见（selfshare.share_level 非空；未共享按 404 不泄露）
+    → 不在对方屏蔽名单 → 当日无 from→to 任何鞭策（目标/计划合并限频）→ 落库 + Web Push。"""
+    conn = get_conn()
+    if conn.execute(
+        "SELECT 1 FROM accounts WHERE id = ?", (to_account_id,)
+    ).fetchone() is None:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    if from_account_id == to_account_id:
+        raise HTTPException(status_code=400, detail="不能鞭策自己")
+    if conn.execute(
+        "SELECT 1 FROM circles WHERE id = ?", (circle_id,)
+    ).fetchone() is None:
+        raise HTTPException(status_code=404, detail="圈子不存在")
+    if conn.execute(
+        "SELECT 1 FROM memberships WHERE account_id = ? AND circle_id = ?",
+        (from_account_id, circle_id),
+    ).fetchone() is None:
+        raise HTTPException(status_code=403, detail="你不是这个圈子的成员")
+    if conn.execute(
+        "SELECT 1 FROM memberships WHERE account_id = ? AND circle_id = ?",
+        (to_account_id, circle_id),
+    ).fetchone() is None:
+        raise HTTPException(status_code=403, detail="对方不在这个圈子")
+    # 未共享 plan 类别按不存在处理，不泄露共享状态
+    if selfshare.share_level(conn, to_account_id, from_account_id, "plan") is None:
+        raise HTTPException(status_code=404, detail="今日计划不存在")
+    if conn.execute(
+        "SELECT 1 FROM nudge_blocks WHERE account_id = ? AND blocked_account_id = ?",
+        (to_account_id, from_account_id),
+    ).fetchone():
+        raise HTTPException(status_code=403, detail="对方已屏蔽你")
+    today = date.today().isoformat()
+    if conn.execute(
+        """SELECT 1 FROM nudges WHERE from_account_id = ? AND to_account_id = ?
+           AND substr(created_at, 1, 10) = ?""",
+        (from_account_id, to_account_id, today),
+    ).fetchone():
+        raise HTTPException(status_code=429, detail="今天已经鞭策过 TA 了")
+    message = (message or "").strip()[:200]
+    nudge_id = uuid.uuid4().hex[:12]
+    conn.execute(
+        "INSERT INTO nudges (id, goal_id, plan_date, from_account_id, to_account_id, message, created_at)"
+        " VALUES (?, NULL, ?, ?, ?, ?, ?)",
+        (nudge_id, today, from_account_id, to_account_id, message, _now()),
+    )
+    conn.commit()
+    push.notify_plan_nudge(to_account_id, from_account_id, message)
+    return {"id": nudge_id, "status": "sent"}
+
+
+def list_plan_nudges(account_id: str, day: str | None = None) -> dict:
+    """某天收到的计划鞭策留言列表：只查 to_account_id=account_id，结构上只有本人可见；
+    发送者昵称优先共同圈子的圈内昵称（与目标鞭策同口径）。"""
+    conn = get_conn()
+    selfshare.require_account(conn, account_id)
+    day = day or date.today().isoformat()
+    rows = conn.execute(
+        """SELECT n.id, n.from_account_id, n.message, n.plan_date, n.created_at,
+                  a.nickname AS account_nickname
+           FROM nudges n LEFT JOIN accounts a ON a.id = n.from_account_id
+           WHERE n.to_account_id = ? AND n.plan_date = ?
+           ORDER BY n.created_at DESC""",
+        (account_id, day),
+    ).fetchall()
+    nudges = []
+    for r in rows:
+        d = dict(r)
+        common = conn.execute(
+            """SELECT u.nickname FROM memberships mf
+               JOIN memberships mt ON mt.circle_id = mf.circle_id AND mt.account_id = ?
+               JOIN users u ON u.id = mf.user_id
+               WHERE mf.account_id = ? LIMIT 1""",
+            (account_id, d["from_account_id"]),
+        ).fetchone()
+        d["from_nickname"] = (common["nickname"] if common else None) or d.pop("account_nickname", None)
+        d.pop("account_nickname", None)
+        nudges.append(d)
+    return {"date": day, "count": len(nudges), "nudges": nudges}

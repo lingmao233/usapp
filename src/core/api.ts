@@ -21,6 +21,7 @@ import type {
   LedgerMonth,
   Nudge,
   PairGraph,
+  PlanNudge,
   RelatedFragment,
   Report,
   ReportMeta,
@@ -367,6 +368,22 @@ export function createApi(req: RequestFn) {
         method: "POST",
         body: { account_id, blocked_account_id },
       }),
+
+    // 计划鞭策：对共享了今日计划的同圈成员（与目标鞭策合并限频——同人一天共 1 次，429 兜底）
+    sendPlanNudge: (from_account_id: string, to_account_id: string, circle_id: string, message: string) =>
+      req<{ id?: string; status?: string }>("/api/plans/nudge", {
+        method: "POST",
+        body: { account_id: from_account_id, to_account_id, circle_id, message },
+      }),
+
+    // 我收到的计划鞭策留言（仅本人；服务端包 {date, count, nudges}；date 缺省服务端取今天）
+    listPlanNudges: async (account_id: string, date?: string) =>
+      unwrapList<PlanNudge>(
+        await req<PlanNudge[] | { nudges?: PlanNudge[] }>(
+          `/api/plans/nudges?account_id=${account_id}${date ? `&date=${date}` : ""}`,
+        ),
+        "nudges",
+      ),
 
     /* ---------------- 个人功能：今日计划 ---------------- */
 

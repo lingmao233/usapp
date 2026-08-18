@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { Menu, Search } from "lucide-react"
+import { ArrowLeft, Menu, Search } from "lucide-react"
 import { Navigate, NavLink, Route, Routes, useNavigate } from "react-router"
 import {
   clearAccount,
@@ -162,6 +162,18 @@ export default function App() {
       {/* 顶栏：4 tab + 搜索 + 汉堡；nav 用 min-w-0 + overflow-x-auto 收缩，375px 不再重叠 */}
       <header className="sticky top-0 z-10 backdrop-blur-sm bg-[#F5F0E1]/85 border-b border-[#264653]/10">
         <div className="max-w-3xl mx-auto px-3 sm:px-5 py-3 flex items-center gap-2 sm:gap-4">
+          <button
+            className="p-1.5 -ml-1 text-[#264653] shrink-0 rounded-full hover:bg-[#264653]/8 transition-colors"
+            title="返回入口"
+            aria-label="返回入口"
+            onClick={() => {
+              clearSession()
+              setSession(null)
+              navigate("/")
+            }}
+          >
+            <ArrowLeft size={18} />
+          </button>
           <h1 className="us-serif text-xl shrink-0">我们</h1>
           <span className="hidden sm:inline text-xs text-stone-400 truncate min-w-0">
             {session.circle_name}

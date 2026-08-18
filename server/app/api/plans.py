@@ -1,6 +1,7 @@
 from fastapi import APIRouter, BackgroundTasks
 from pydantic import BaseModel
 
+from ..services import nudges as nudges_svc
 from ..services import plans as svc
 
 router = APIRouter(prefix="/api/plans", tags=["plans"])
@@ -43,3 +44,22 @@ def update_item(item_id: str, body: UpdateItemIn):
 @router.delete("/items/{item_id}")
 def delete_item(item_id: str, account_id: str):
     return svc.delete_item(item_id, account_id)
+
+
+class PlanNudgeIn(BaseModel):
+    account_id: str  # 鞭策发起者（圈友账号）
+    to_account_id: str
+    circle_id: str
+    message: str = ""
+
+
+@router.post("/nudge")
+def send_plan_nudge(body: PlanNudgeIn):
+    """今日计划鞭策：校验链在 service 层（成员/共享/屏蔽/合并限频）。"""
+    return nudges_svc.send_plan_nudge(body.account_id, body.to_account_id, body.circle_id, body.message)
+
+
+@router.get("/nudges")
+def list_plan_nudges(account_id: str, date: str | None = None):
+    """我某天收到的计划鞭策留言（结构上只查本人收件箱，他人数据不可见）。"""
+    return nudges_svc.list_plan_nudges(account_id, date)

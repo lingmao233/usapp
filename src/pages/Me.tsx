@@ -1,12 +1,18 @@
 import { useCallback, useEffect, useState } from "react"
 import { Link, useNavigate } from "react-router"
-import { api, type Goal, type PlanItem } from "@/lib/api"
+import { api, type Goal, type PlanItem, type PlanNudge } from "@/lib/api"
 
 const GOAL_TYPE_LABEL: Record<string, string> = {
   weight_loss: "减肥",
   savings: "存款",
   study: "学习",
   custom: "自定义",
+}
+
+function timeLabel(iso: string) {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  return `${d.getMonth() + 1}月${d.getDate()}日`
 }
 
 /** 从 progress dict 提取百分比（键名宽松匹配；≤1 视为比例），没有则隐藏进度条 */
@@ -52,6 +58,7 @@ export default function Me({ accountId }: { accountId: string }) {
   const [items, setItems] = useState<PlanItem[]>([])
   const [generating, setGenerating] = useState(false)
   const [goals, setGoals] = useState<Goal[]>([])
+  const [planNudges, setPlanNudges] = useState<PlanNudge[]>([])
   const [draft, setDraft] = useState("")
   const [adding, setAdding] = useState(false)
   const [submitError, setSubmitError] = useState("")
@@ -91,6 +98,14 @@ export default function Me({ accountId }: { accountId: string }) {
     api
       .listGoals(accountId)
       .then(setGoals)
+      .catch(() => {})
+  }, [accountId])
+
+  // 今天收到的计划鞭策留言（仅本人可见；独立成败）
+  useEffect(() => {
+    api
+      .listPlanNudges(accountId)
+      .then(setPlanNudges)
       .catch(() => {})
   }, [accountId])
 
@@ -217,6 +232,26 @@ export default function Me({ accountId }: { accountId: string }) {
           </button>
         </div>
         {submitError && <p className="text-xs text-red-500 mt-2">{submitError}</p>}
+
+        {/* 今天收到的计划鞭策留言（样式照抄 GoalDetail 鞭策留言列表，简化无屏蔽管理） */}
+        {planNudges.length > 0 && (
+          <div className="bg-white/60 rounded-2xl p-5 mt-4">
+            <p className="us-serif text-base mb-3">计划鞭策</p>
+            <div className="flex flex-col gap-3">
+              {planNudges.map((n) => (
+                <div key={n.id} className="text-sm">
+                  <div className="flex items-baseline gap-2">
+                    <span className="font-medium text-[#264653]">
+                      {n.from_nickname ?? "圈友"}
+                    </span>
+                    <span className="text-xs text-stone-400">{timeLabel(n.created_at)}</span>
+                  </div>
+                  {n.message && <p className="text-stone-600 mt-0.5">{n.message}</p>}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </section>
 
       {/* 目标卡列表：空态引导去新建 */}

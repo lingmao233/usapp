@@ -58,7 +58,8 @@ _DEFAULT_CLASSIFY = {
 
 def mode() -> dict:
     return {"llm": "mock" if settings.llm_mock else "real",
-            "embedding": "mock" if settings.embed_mock else "real"}
+            "embedding": "mock" if settings.embed_mock else "real",
+            "vision": "on" if settings.vision_enabled else "off"}
 
 
 def classify_fragment(content: str) -> dict:

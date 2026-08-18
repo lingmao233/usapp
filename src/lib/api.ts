@@ -99,6 +99,7 @@ export type {
   Nudge,
   PairGraph,
   PlanItem,
+  PlanNudge,
   RelatedFragment,
   Report,
   ReportMeta,

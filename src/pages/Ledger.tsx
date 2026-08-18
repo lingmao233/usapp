@@ -67,6 +67,8 @@ export default function Ledger({ accountId }: { accountId: string }) {
   const [mDate, setMDate] = useState(todayLocal())
   const [manualBusy, setManualBusy] = useState(false)
   const [submitError, setSubmitError] = useState("")
+  // 分类筛选：null = 全部
+  const [catFilter, setCatFilter] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     try {
@@ -214,8 +216,8 @@ export default function Ledger({ accountId }: { accountId: string }) {
     }
   })
   const categoryRows = [...byCategory.entries()].sort((a, b) => b[1] - a[1])
-  // 服务端已按 spent_at 倒序
-  const sorted = expenses
+  // 服务端已按 spent_at 倒序；分类筛选在客户端做（整月数据已在手）
+  const sorted = catFilter ? expenses.filter((e) => (e.category || "其他") === catFilter) : expenses
 
   return (
     <div className="max-w-2xl mx-auto px-5 py-8">
@@ -353,14 +355,24 @@ export default function Ledger({ accountId }: { accountId: string }) {
 
       {/* 月视图：月份切换 + 总额 + 存款预算进度 + 分类小计 + 明细 */}
       <section>
-        <div className="flex items-center justify-between mb-3">
-          <button className="us-btn-ghost text-sm" onClick={() => setMonth(shiftMonth(month, -1))}>
+        <div className="flex items-center justify-between gap-2 mb-3">
+          <button className="us-btn-ghost text-sm shrink-0" onClick={() => setMonth(shiftMonth(month, -1))}>
             ← 上月
           </button>
-          <p className="us-serif text-lg">
-            {month} · 共 ¥{fenToYuan(totalFen)}
-          </p>
-          <button className="us-btn-ghost text-sm" onClick={() => setMonth(shiftMonth(month, 1))}>
+          <div className="flex items-center gap-2 min-w-0">
+            {/* 原生月份选择器：可直接跳任意年/月，移动端友好 */}
+            <input
+              type="month"
+              className="us-input !w-auto !py-1 px-2 text-sm"
+              value={month}
+              onChange={(e) => e.target.value && setMonth(e.target.value)}
+              aria-label="选择月份"
+            />
+            <span className="us-serif text-lg whitespace-nowrap shrink-0">
+              共 ¥{fenToYuan(totalFen)}
+            </span>
+          </div>
+          <button className="us-btn-ghost text-sm shrink-0" onClick={() => setMonth(shiftMonth(month, 1))}>
             下月 →
           </button>
         </div>
@@ -386,17 +398,36 @@ export default function Ledger({ accountId }: { accountId: string }) {
 
         {categoryRows.length > 0 && (
           <div className="flex gap-2 flex-wrap mb-4">
+            {/* 分类小计即筛选器：点 chip 只看该类，再点或点「全部」还原 */}
+            <button
+              className={`us-chip transition-colors ${
+                catFilter === null ? "bg-[#161616] text-white" : ""
+              }`}
+              onClick={() => setCatFilter(null)}
+            >
+              全部
+            </button>
             {categoryRows.map(([c, fen]) => (
-              <span key={c} className="us-chip">
+              <button
+                key={c}
+                className={`us-chip transition-colors ${
+                  catFilter === c ? "bg-[#161616] text-white" : ""
+                }`}
+                onClick={() => setCatFilter(catFilter === c ? null : c)}
+              >
                 {c} ¥{fenToYuan(fen)}
-              </span>
+              </button>
             ))}
           </div>
         )}
 
         {sorted.length === 0 ? (
           <p className="text-sm text-stone-400 py-8 text-center">
-            {loaded ? "这个月还没有账，记一笔？" : "加载中…"}
+            {loaded
+              ? catFilter
+                ? `这个月没有「${catFilter}」的账`
+                : "这个月还没有账，记一笔？"
+              : "加载中…"}
           </p>
         ) : (
           <div className="flex flex-col">
