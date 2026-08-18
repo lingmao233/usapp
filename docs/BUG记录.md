@@ -183,3 +183,13 @@
   - 桌面端平铺的 5 个文字按钮全部移除，汉堡下拉统一只留 设置/个人 两项（通知开启入口迁到 /settings）
 - **验证**：`npm run build` 通过、`cd weapp && npx tsc --noEmit` 通过；375px 静态核算：内容区 351px，固定元素（标题+搜索+汉堡）约 100px，nav 弹性吸收余量，溢出只会触发 nav 内部滚动，结构上与文字不再可能重叠。
 - **预防**：**顶栏/底栏新增入口前先做 375px 宽度核算**；横向排列的一组按钮必须有一个 `min-w-0 + overflow-x-auto` 的弹性吸收区，图标入口优先于文字入口。
+
+## BUG-013 阿里视觉账单识别耗时十几秒
+
+- **日期**：2026-08-18
+- **环境**：两端代码路径（阿里百炼真实耗时由生产 key 触发）
+- **现象**：在记账页上传小票或支付截图后，界面持续显示「识别中…」，通常十几秒才出现待确认账目，明显打断记账流程。
+- **根因**：三段延迟叠加：① `server/app/ai/vision.py` 把 `VISION_REASONING=minimal` 作为 `reasoning_effort` 发送，但阿里 Qwen3-VL 的 OpenAI Chat 接口使用 `enable_thinking` 控制思考，原配置没有真正锁定非思考模式；② 配置文档推荐 `qwen-vl-max-latest`，模型选型偏效果而非低延迟；③ `src/pages/Ledger.tsx` 和 `src/pages/Calories.tsx` 同时上传手机原图与 1600px 压缩图，而服务端识别只读取压缩图，移动网络白传一份大原图。结构化识别还未启用模型原生 JSON Mode。
+- **修复**：`vision.py` 对阿里 `qwen3-vl-*` 将空值/`none`/`minimal` 显式映射为 `enable_thinking=false`，非思考识别启用 `response_format=json_object`，并记录模型、图片 KB 与调用耗时；账单 prompt 改顶层 `{items: [...]}`，业务层兼容对象/旧数组两种结果；记账与热量页只上传 1600px JPEG；`.env.example`、README 与部署文档改荐 `qwen3-vl-flash` + `VISION_REASONING=none`。
+- **验证**：新增请求契约测试先在旧代码上稳定失败（缺 `enable_thinking`/JSON Mode、对象结果误回退 mock），修复后转绿；`server/.venv-win/Scripts/python -m pytest server/tests -q` 157/157；`npm run build`、`npm run lint`、`cd weapp && npx tsc --noEmit` 通过。仓库无真实百炼 key，生产绝对耗时需部署后用日志 `vision json ... image_kb=... elapsed_ms=...` 做最终 A/B。
+- **预防**：外部模型的性能配置必须按具体厂商和模型系列写契约测试，不能把同名兼容参数视为等价；交互式短抽取默认选 Flash + 非思考 + JSON Mode；上传前核对服务端实际消费哪份图片，禁止重复传输未使用的原图。

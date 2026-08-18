@@ -109,6 +109,52 @@ def test_vision_caption_payload_shape(monkeypatch) -> None:
     assert content[0]["type"] == "image_url" and content[1]["type"] == "text"
 
 
+def test_qwen3_vl_json_uses_fast_non_thinking_payload(monkeypatch, tmp_path) -> None:
+    """阿里 Qwen3-VL 的结构化识别必须显式关思考，并让服务端保证 JSON。"""
+    captured: dict = {}
+
+    class Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"choices": [{"message": {"content": '{"items": []}'}}]}
+
+    monkeypatch.setattr(
+        vision.httpx, "post",
+        lambda url, headers=None, json=None, timeout=None: captured.update(url=url, payload=json)
+        or Resp(),
+    )
+    monkeypatch.setattr(settings, "VISION_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+    monkeypatch.setattr(settings, "VISION_MODEL", "qwen3-vl-flash")
+    # 兼容项目原先建议的最低档配置；对 Qwen3-VL 应映射为真正关闭思考。
+    monkeypatch.setattr(settings, "VISION_REASONING", "minimal")
+    image = tmp_path / "receipt.jpg"
+    image.write_bytes(JPEG_A)
+
+    assert vision.vision_json(str(image), "请按 JSON 格式输出") == {"items": []}
+    payload = captured["payload"]
+    assert payload["enable_thinking"] is False
+    assert "reasoning_effort" not in payload
+    assert payload["response_format"] == {"type": "json_object"}
+
+
+def test_receipt_accepts_json_object_wrapper(monkeypatch) -> None:
+    """JSON Mode 要求顶层对象；账单识别从 items 解包，业务层仍收到数组。"""
+    expected = [{
+        "amount": 35.5,
+        "merchant": "麦当劳",
+        "time": "2026-08-16 12:30",
+        "category": "餐饮",
+        "type": "expense",
+    }]
+    monkeypatch.setattr(settings, "VISION_API_KEY", "x")
+    monkeypatch.setattr(settings, "VISION_MODEL", "qwen3-vl-flash")
+    monkeypatch.setattr(vision, "vision_json", lambda path, prompt: {"items": expected})
+
+    assert ai.recognize_receipt("receipt.jpg") == expected
+
+
 # ---------- 碎片向量：正文 + caption 拼接 ----------
 
 def test_fragment_embedding_text_with_caption(monkeypatch) -> None:

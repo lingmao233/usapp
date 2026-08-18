@@ -31,7 +31,7 @@ class Settings:
     VISION_API_KEY: str = os.getenv("VISION_API_KEY", "") or LLM_API_KEY
     VISION_BASE_URL: str = os.getenv("VISION_BASE_URL", "") or LLM_BASE_URL
     VISION_MODEL: str = os.getenv("VISION_MODEL", "")
-    # caption/识别调用的思考强度（minimal/low/medium/high），空 = 不传参；深度思考类模型建议 minimal
+    # 阿里 Qwen3-VL：空/none/minimal = 关思考，on/low/medium/high = 开思考；其他厂商透传 reasoning_effort
     VISION_REASONING: str = os.getenv("VISION_REASONING", "")
 
     # 高德 Web 服务（方案真实数据：POI/天气/通勤）：空 = 回退纯 LLM 经验方案

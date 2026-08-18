@@ -1,15 +1,60 @@
-"""视觉模型（OpenAI 兼容 chat/completions 多模态消息）：图片 caption 与结构化识别。
-
-开关在调用方（settings.vision_enabled）；VISION_REASONING 非空时传 reasoning_effort 压思考成本。
-"""
+"""视觉模型（OpenAI 兼容 chat/completions 多模态消息）：图片 caption 与结构化识别。"""
 import base64
 import json
+import logging
 import os
 import re
+import time
 
 import httpx
 
 from ..config import settings
+
+logger = logging.getLogger("us.ai")
+
+_NO_THINKING = {"", "0", "false", "off", "none", "disabled", "minimal"}
+
+
+def _is_dashscope_qwen3_vl() -> bool:
+    """阿里 Qwen3-VL 通过 enable_thinking 控制思考，不使用 reasoning_effort。"""
+    model = settings.VISION_MODEL.strip().lower()
+    base_url = settings.VISION_BASE_URL.strip().lower()
+    return "dashscope" in base_url and model.startswith("qwen3-vl-")
+
+
+def _apply_generation_options(payload: dict, *, json_mode: bool = False) -> None:
+    reasoning = settings.VISION_REASONING.strip().lower()
+    if _is_dashscope_qwen3_vl() and "thinking" not in settings.VISION_MODEL.lower():
+        # Qwen3-VL 的 OpenAI Chat 接口用布尔开关。项目旧文档推荐的 minimal
+        # 也映射为关闭，避免看似最低档、实际仍进入思考的高延迟。
+        payload["enable_thinking"] = reasoning not in _NO_THINKING
+        if json_mode and not payload["enable_thinking"]:
+            payload["response_format"] = {"type": "json_object"}
+        return
+    if settings.VISION_REASONING:
+        payload["reasoning_effort"] = settings.VISION_REASONING
+
+
+def _post(payload: dict, *, operation: str, image_bytes: int):
+    started = time.perf_counter()
+    try:
+        resp = httpx.post(
+            f"{settings.VISION_BASE_URL.rstrip('/')}/chat/completions",
+            headers={"Authorization": f"Bearer {settings.VISION_API_KEY}"},
+            json=payload,
+            timeout=30.0,
+        )
+    finally:
+        elapsed_ms = round((time.perf_counter() - started) * 1000)
+        logger.info(
+            "vision %s model=%s image_kb=%d elapsed_ms=%d",
+            operation,
+            settings.VISION_MODEL,
+            round(image_bytes / 1024),
+            elapsed_ms,
+        )
+    resp.raise_for_status()
+    return resp
 
 
 def vision_caption(image_bytes: bytes, fmt: str = "jpeg") -> str:
@@ -20,7 +65,6 @@ def vision_caption(image_bytes: bytes, fmt: str = "jpeg") -> str:
     转录，主体/场景/关键物体/氛围都写出来。
     """
     data_url = f"data:image/{fmt};base64,{base64.b64encode(image_bytes).decode()}"
-    url = f"{settings.VISION_BASE_URL.rstrip('/')}/chat/completions"
     payload = {
         "model": settings.VISION_MODEL,
         "messages": [
@@ -38,16 +82,8 @@ def vision_caption(image_bytes: bytes, fmt: str = "jpeg") -> str:
             }
         ],
     }
-    # 深度思考类模型可压思考强度省 token；未配置时不传该参，对不支持它的模型零风险
-    if settings.VISION_REASONING:
-        payload["reasoning_effort"] = settings.VISION_REASONING
-    resp = httpx.post(
-        url,
-        headers={"Authorization": f"Bearer {settings.VISION_API_KEY}"},
-        json=payload,
-        timeout=30.0,
-    )
-    resp.raise_for_status()
+    _apply_generation_options(payload)
+    resp = _post(payload, operation="caption", image_bytes=len(image_bytes))
     return str(resp.json()["choices"][0]["message"]["content"]).strip()
 
 
@@ -63,7 +99,6 @@ def vision_json(image_path: str, prompt: str) -> dict | list:
         image_bytes = f.read()
     fmt = os.path.splitext(image_path)[1].lstrip(".").lower().replace("jpg", "jpeg") or "jpeg"
     data_url = f"data:image/{fmt};base64,{base64.b64encode(image_bytes).decode()}"
-    url = f"{settings.VISION_BASE_URL.rstrip('/')}/chat/completions"
     payload = {
         "model": settings.VISION_MODEL,
         "messages": [
@@ -76,16 +111,8 @@ def vision_json(image_path: str, prompt: str) -> dict | list:
             }
         ],
     }
-    # 深度思考类模型可压思考强度省 token；未配置时不传该参，对不支持它的模型零风险
-    if settings.VISION_REASONING:
-        payload["reasoning_effort"] = settings.VISION_REASONING
-    resp = httpx.post(
-        url,
-        headers={"Authorization": f"Bearer {settings.VISION_API_KEY}"},
-        json=payload,
-        timeout=30.0,
-    )
-    resp.raise_for_status()
+    _apply_generation_options(payload, json_mode=True)
+    resp = _post(payload, operation="json", image_bytes=len(image_bytes))
     text = str(resp.json()["choices"][0]["message"]["content"]).strip()
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text)
     try:

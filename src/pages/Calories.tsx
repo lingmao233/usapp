@@ -71,7 +71,8 @@ export default function Calories({ accountId }: { accountId: string }) {
     setRecBusy(true)
     setRecError("")
     try {
-      const url = (await api.uploadImage(image.original, image.display)).url
+      // 视觉识别只需压缩图，避免移动端重复上传原图。
+      const url = (await api.uploadImage(image.display)).url
       const entry = await api.recognizeFood(accountId, url, hint.trim() || undefined)
       setPending({
         id: entry.id,
