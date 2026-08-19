@@ -405,6 +405,8 @@ def recognize_receipt(image_path: str) -> list[dict] | None:
         return None
     try:
         result = vision.vision_json(image_path, RECEIPT_PROMPT)
+        if isinstance(result, dict):
+            result = result.get("items")
         if not isinstance(result, list):
             raise ValueError(f"账单识别应返回数组，实际为 {type(result).__name__}")
         return result

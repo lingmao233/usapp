@@ -92,7 +92,8 @@ export default function Ledger({ accountId }: { accountId: string }) {
     setRecBusy(true)
     setRecError("")
     try {
-      const url = (await api.uploadImage(image.original, image.display)).url
+      // 识别只需要压缩后的 1600px JPEG；不再把手机原图重复上传。
+      const url = (await api.uploadImage(image.display)).url
       const list = await api.recognizeReceipt(accountId, url)
       const today = todayLocal()
       setPending(
