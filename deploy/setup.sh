@@ -121,9 +121,14 @@ env_set() {
   fi
 }
 
+# 读 .env 里的 KEY=value（首行生效，无该行/文件时输出空）。
+# 用 awk 单进程实现，不用 grep|head 管道：set -o pipefail 下，
+# grep 未命中（exit 1）或多行命中时 head 提前关管道（SIGPIPE 141）
+# 都会让调用处的命令替换失败，set -e 直接把整个脚本静默杀掉（见 docs/BUG记录.md BUG-014）
 env_get() {
   local key="$1" file="$2"
-  grep "^${key}=" "$file" 2>/dev/null | head -1 | cut -d= -f2-
+  [ -f "$file" ] || return 0
+  awk -v key="$key" 'index($0, key "=") == 1 { print substr($0, length(key) + 2); exit }' "$file"
 }
 
 mask() {

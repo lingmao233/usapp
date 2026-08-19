@@ -193,3 +193,13 @@
 - **修复**：`src/App.tsx` 删除 `selfOnly` state，Self/树洞区改由 `useLocation` 派生（`inSelfArea = /treehole 或 /me 前缀`）；Landing 三个入口与「返回入口」只 `navigate()`，Routes 只在 location 变更触发的 commit 里挂载，匹配到的必是新 location。顺带修复：无圈状态下刷新/直开 /me、/treehole 此前会掉回落地页，现在直达。
 - **验证**：`npm run build`（含 `tsc -b`）与 eslint 通过；jsdom 加载真实构建产物回归 9 断言全过（点树洞→/treehole 聊天页、点 Self→/me、直开 /treehole、返回入口回落地页，均无页面错误）。
 - **预防**：「条件挂载 `<Routes>`」与「navigate 进该 Routes 内的路由」禁止放同一事件 commit——要么分帧，要么用 location 派生挂载条件；带 `<Route path="*">` 兜底的壳新增入口时，若目标与兜底地址不同，必须手测点击后的真实落点（目标与兜底相同的入口会掩盖此 bug）。
+
+## BUG-014 deploy/setup.sh 第 4 步后静默退出（set -e + pipefail 管道陷阱）
+
+- **日期**：2026-08-20
+- **环境**：腾讯云生产（脚本缺陷，任何跑该脚本的环境同在）
+- **现象**：`git pull && bash deploy/setup.sh --yes` 打印完「第 4 步：配置 .env ✔ .env 已存在，不覆盖」后直接回到 shell 提示符，无错误输出、无第 5/6 步，部署实际未执行。
+- **根因**：`configure_env` 里 `llm_key="$(env_get LLM_API_KEY "$env_file")"`，而 `env_get` 实现是 `grep | head | cut` 管道。脚本头部有 `set -euo pipefail`：(a) .env 中**没有** `LLM_API_KEY=` 行时 grep 退出码 1，pipefail 让管道整体失败，命令替换赋值在 set -e 下直接杀掉脚本——本机已复现（exit 1、无任何输出）；(b) 该 key **有多行**时 GNU grep 写完首行后 head -1 关闭管道，grep 收到 SIGPIPE（141），同样经 pipefail + set -e 杀脚本。两种触发都不打印错误，表现为「只有四步」。
+- **修复**：`deploy/setup.sh` 的 `env_get` 改为 awk 单进程实现（`index($0, key "=") == 1` 匹配首行即 exit），无管道、无 SIGPIPE、无 grep 退出码，并显式处理文件不存在；`env_set` 的 `grep -q` 在 if 条件里不受 set -e 影响，未动。
+- **验证**：本地对修复后函数跑 6 场景（缺行/单行/重复行/空值行/文件不存在/值含特殊字符）全部存活且取值正确；source 脚本后完整跑 `configure_env`（--yes + 缺 key 的 .env）能走完警告输出不再中断。服务器端完整流程待用户重跑确认。
+- **预防**：**`set -euo pipefail` 的脚本里，命令替换 `$(...)` 中的管道必须假设每个环节都会失败**——取值类函数优先用 awk/sed 单进程，或管道兜底 `|| true`；给脚本加步骤后先在「.env 缺 key」的最坏输入下空跑一遍。
