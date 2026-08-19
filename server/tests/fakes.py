@@ -457,6 +457,7 @@ def _web_search_food(name: str, brand: str = "") -> dict | None:
 PATCHES: dict[str, object] = {
     "classify_fragment": classify,
     "embed_text": embed,
+    "embed_texts": lambda texts: [embed(t) for t in texts],
     "summarize_text": summarize,
     "generate_weekly_report": _weekly_report,
     "confirm_common_wishes": lambda *a, **k: [],

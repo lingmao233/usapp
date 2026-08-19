@@ -24,6 +24,7 @@ sys.path.insert(0, SERVER_DIR)
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
+import fakes  # noqa: E402
 from app import ai  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.db.database import encode_embedding, get_conn, init_db  # noqa: E402
@@ -154,6 +155,22 @@ def test_seed_food_nutrition_idempotent(client: TestClient) -> None:
     ).fetchone()["c"] == 0
     init_db()  # 幂等：再跑一遍条数不变
     assert conn.execute("SELECT COUNT(*) AS c FROM food_nutrition").fetchone()["c"] == count
+
+
+def test_seed_food_nutrition_skips_when_embedding_unconfigured(monkeypatch) -> None:
+    """未配置 embedding 时灌库跳过且不阻塞启动（BUG-015 回归）；
+    配置恢复后重跑 init_db 能补灌（表仍为空 → 种子条件重新满足）。"""
+    conn = get_conn()
+    conn.execute("DELETE FROM food_nutrition")
+    conn.commit()
+    # 装回真实门面：conftest 已把 key 清空 → _require_embedding 抛 AINotConfiguredError
+    monkeypatch.setattr(ai, "embed_texts", fakes.REAL_IMPLS["embed_texts"])
+    init_db()  # 不炸
+    assert conn.execute("SELECT COUNT(*) AS c FROM food_nutrition").fetchone()["c"] == 0
+    # 恢复桩（模拟配好 key）重试：正常灌入，同时给后续用例恢复现场
+    monkeypatch.setattr(ai, "embed_texts", fakes.PATCHES["embed_texts"])
+    init_db()
+    assert conn.execute("SELECT COUNT(*) AS c FROM food_nutrition").fetchone()["c"] > 0
 
 
 # ---------- 匹配：LIKE 归一 → 向量兜底 ----------

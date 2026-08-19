@@ -203,3 +203,18 @@
 - **修复**：`deploy/setup.sh` 的 `env_get` 改为 awk 单进程实现（`index($0, key "=") == 1` 匹配首行即 exit），无管道、无 SIGPIPE、无 grep 退出码，并显式处理文件不存在；`env_set` 的 `grep -q` 在 if 条件里不受 set -e 影响，未动。
 - **验证**：本地对修复后函数跑 6 场景（缺行/单行/重复行/空值行/文件不存在/值含特殊字符）全部存活且取值正确；source 脚本后完整跑 `configure_env`（--yes + 缺 key 的 .env）能走完警告输出不再中断。服务器端完整流程待用户重跑确认。
 - **预防**：**`set -euo pipefail` 的脚本里，命令替换 `$(...)` 中的管道必须假设每个环节都会失败**——取值类函数优先用 awk/sed 单进程，或管道兜底 `|| true`；给脚本加步骤后先在「.env 缺 key」的最坏输入下空跑一遍。
+
+## BUG-015 启动灌库把服务搞挂/卡死：缺 key 启动即崩 + 逐条 embedding 卡到健康检查超时
+
+- **日期**：2026-08-20
+- **环境**：腾讯云生产（首次部署/清库后必现），本机可复现
+- **现象**：`deploy/setup.sh` 第 6 步健康检查超时，服务起不来。两种形态：(a) `.env` 缺 embedding key 时应用启动即崩——`init_db → _seed_food_nutrition → ai.embed_text` 抛 `AINotConfiguredError` 穿透 lifespan，进程直接退出；(b) key 正常时启动被 600+ 次**逐条** embeddings API 调用卡住数分钟（日志被 `POST .../embeddings 200 OK` 刷屏），uvicorn 迟迟不监听，60 秒健康检查报超时（实际灌完库服务能起来）。
+- **根因**：`_seed_food_nutrition`（`server/app/db/database.py`）在启动路径上逐条同步调 embedding API：无容错（缺 key 直接炸穿启动）、无批量（分钟级启动）、逐行 INSERT 中途失败还会留下半灌入状态（表非空但缺行，之后启动 count>0 永不重试）。
+- **修复**：
+  - `server/app/ai/embedding.py` 新增 `embed_batch`：`input` 传数组一次请求多条，64 条分块，按返回 `index` 对齐入参顺序
+  - `server/app/ai/__init__.py` 加门面 `embed_texts`（`_require_embedding` 同口径）
+  - `database.py` 灌库改为「批量取向量 → `executemany` 一次落库」，整体 try/except：未配置或调用失败打 warning 跳过，不阻塞启动；表仍为空，下次启动自动重试
+  - `server/tests/fakes.py` 补 `embed_texts` 桩（逐条映射现有 n-gram 桩）
+- **顺带修正（smoke 存量漂移）**：`scripts/smoke_test.py` 第 11/12/13 节还停在账号系统重构前的契约——`/api/accounts/claim` 已下线（改走 `/api/auth/reset`）、个人功能接口已从 `user_id` 改 `account_id`、目标共享从 per-goal 字段改 `/api/self/sharing` 类别开关。本次一并改写：找回链路改用带账号名的注册账号走 auth/reset（含重置失效、存量 8 位码大小写折叠），个人功能段全量换账号级 API。
+- **验证**：新增 `test_seed_food_nutrition_skips_when_embedding_unconfigured`（装回真实门面断言跳过不崩 + 恢复桩后自动补灌）；`embed_batch` 分块/乱序对齐/空输入直测通过；pytest 203/203；smoke 62 断言全过。
+- **预防**：**启动路径（lifespan/init_db）禁止无容错的外部调用**——任何网络/AI 调用必须可跳过、可下次重试；批量数据初始化一律用批量 API；改 API 契约时必须同步 grep 更新 `scripts/smoke_test.py`（它不在 pytest 收集范围里，重构容易漏）。

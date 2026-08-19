@@ -101,6 +101,12 @@ def embed_text(text: str) -> np.ndarray:
     return embedding.embed(text)
 
 
+def embed_texts(texts: list[str]) -> list[np.ndarray]:
+    """批量文本向量（启动灌库等批量场景）：一次请求多条，逐条调会把启动卡到分钟级。"""
+    _require_embedding()
+    return embedding.embed_batch(texts)
+
+
 def image_caption(image_bytes: bytes, fmt: str = "jpeg") -> str:
     """图片 caption：视觉关闭（未配 key / 未配 VISION_MODEL）返回空跳过；
     调用失败同样优雅跳过（记 degraded，不影响任何现有功能）。"""

@@ -227,18 +227,13 @@ def run_all(client: TestClient) -> None:
     r = client.post("/api/circles", json={"name": "圈子C", "account_id": acc})
     check("已有 account 建圈 recovery_code 为 null", r.json().get("recovery_code") is None)
 
-    # claim 成功 / 失败
+    # claim 端点已下线：找回只走 /api/auth/reset（完整覆盖见 tests/test_recovery.py）
     r = client.post("/api/accounts/claim", json={"recovery_code": code_a})
-    check("恢复码 claim 成功", r.status_code == 200 and r.json()["account_id"] == acc,
-          r.json().get("nickname", ""))
-    r = client.post("/api/accounts/claim", json={"recovery_code": "XXXX9999"})
-    check("错误恢复码 claim 返回 404", r.status_code == 404)
-    r = client.post("/api/accounts/claim", json={"recovery_code": code_a.lower()})
-    check("恢复码大小写不敏感", r.status_code == 200 and r.json()["account_id"] == acc)
+    check("旧 claim 端点已下线（404/405）", r.status_code in (404, 405))
 
-    # claim 后圈子列表完整
+    # 圈子列表完整（3 个）
     claimed = client.get(f"/api/accounts/{acc}/circles").json()
-    check("claim 后圈子列表完整（3 个）", len(claimed["circles"]) == 3,
+    check("账号圈子列表完整（3 个）", len(claimed["circles"]) == 3,
           "、".join(c["circle_name"] for c in claimed["circles"]))
 
     # 昵称冲突：另一 account 用同名（带空格变体）加入圈子 A → 409
@@ -269,8 +264,6 @@ def run_all(client: TestClient) -> None:
           r.status_code == 200 and r.json()["recovery_code"] == "km2pvq")
     r = client.put(f"/api/accounts/{acc6}/recovery_code", json={"code": "芝麻开门"})
     check("汉字身份码成功", r.status_code == 200 and r.json()["recovery_code"] == "芝麻开门")
-    r = client.post("/api/accounts/claim", json={"recovery_code": "芝麻开门"})
-    check("汉字身份码可 claim", r.status_code == 200 and r.json()["account_id"] == acc6)
     r = client.put(f"/api/accounts/{acc6}/recovery_code", json={"code": "   "})
     check("空身份码返回 400", r.status_code == 400)
     r = client.put(f"/api/accounts/{acc6}/recovery_code", json={"code": "长" * 65})
@@ -285,43 +278,54 @@ def run_all(client: TestClient) -> None:
     r = client.put(f"/api/accounts/{acc6}/recovery_code", json={"code": "pw8hjt"})
     check("身份码冲突大小写不敏感", r.status_code == 409)
 
-    # 重置：旧码立即失效，新码可 claim
+    # 重置：旧码立即失效，新码可找回（claim 已下线，找回走 /api/auth/reset，需账号名登录体系）
     old_code = client.get(f"/api/accounts/{acc6}").json()["recovery_code"]
     r = client.post(f"/api/accounts/{acc6}/recovery_code/reset")
     reset_code = r.json()["recovery_code"]
     check("重置返回新的 6 位码",
           bool(_re.fullmatch(r"[A-HJ-KM-NP-Z2-9]{6}", reset_code)) and reset_code != old_code)
-    r = client.post("/api/accounts/claim", json={"recovery_code": old_code})
-    check("重置后旧码 claim 返回 404", r.status_code == 404)
-    r = client.post("/api/accounts/claim", json={"recovery_code": reset_code})
-    check("重置后新码可 claim", r.status_code == 200 and r.json()["account_id"] == acc6)
 
-    # 存量 8 位码仍可 claim（直接改库模拟老数据）
+    # 找回全链路：注册带账号名的账号，自设汉字凭证 → auth/reset 换密码；重置后旧码失效、新码生效
+    r = client.post("/api/auth/register", json={"username": "smoke-reset", "password": "p1"})
+    acc_auth = r.json()["account_id"]
+    r = client.put(f"/api/accounts/{acc_auth}/recovery_code", json={"code": "芝麻开门"})
+    check("汉字身份码设置（找回账号）", r.status_code == 200)
+    r = client.post("/api/auth/reset", json={
+        "username": "smoke-reset", "recovery_code": "芝麻开门", "new_password": "p2"})
+    check("汉字身份码可找回（auth/reset）", r.status_code == 200)
+    r = client.post(f"/api/accounts/{acc_auth}/recovery_code/reset")
+    new_auth_code = r.json()["recovery_code"]
+    r = client.post("/api/auth/reset", json={"username": "smoke-reset", "recovery_code": "芝麻开门"})
+    check("重置后旧码找回返回 403", r.status_code == 403)
+    r = client.post("/api/auth/reset", json={
+        "username": "smoke-reset", "recovery_code": new_auth_code, "new_password": "p3"})
+    check("重置后新码可找回", r.status_code == 200)
+
+    # 存量 8 位码仍可找回（直接改库模拟老数据；ASCII 大小写折叠）
     import sqlite3 as _sqlite3
     _conn = _sqlite3.connect(os.environ["DB_PATH"])
-    _conn.execute("UPDATE accounts SET recovery_code = 'LEGACY88' WHERE id = ?", (acc6,))
+    _conn.execute("UPDATE accounts SET recovery_code = 'LEGACY88' WHERE id = ?", (acc_auth,))
     _conn.commit()
     _conn.close()
-    r = client.post("/api/accounts/claim", json={"recovery_code": "legacy88"})
-    check("存量 8 位码仍可 claim（大小写不敏感）",
-          r.status_code == 200 and r.json()["account_id"] == acc6)
+    r = client.post("/api/auth/reset", json={"username": "smoke-reset", "recovery_code": "legacy88"})
+    check("存量 8 位码仍可找回（大小写不敏感）", r.status_code == 200)
 
-    # 13. 个人功能：目标 → 今日计划懒生成 → 打勾 → 记账/热量 → 超预算联动 → 鞭策
+    # 13. 个人功能（账号级 API）：目标 → 今日计划懒生成 → 打勾 → 记账/热量 → 超预算联动 → 共享 → 鞭策
+    a1, a2 = u1["account_id"], u2["account_id"]
     r = client.post("/api/goals", json={
-        "user_id": u1["user_id"], "type": "weight_loss", "title": "减掉小肚腩",
+        "account_id": a1, "type": "weight_loss", "title": "减掉小肚腩",
         "params": {"target_weight_kg": 60, "days_left": 90},
-        "answers": {"sex": "male", "weight_kg": 70, "height_cm": 175, "age": 30, "activity": "sedentary"},
-        "visible_circle_ids": [cid], "detail_level": "summary"})
+        "answers": {"sex": "male", "weight_kg": 70, "height_cm": 175, "age": 30, "activity": "sedentary"}})
     goal = r.json()
     check("创建减肥目标（规则框架算预算）",
           r.status_code == 200 and goal["framework"].get("budget_kcal", 0) > 0,
-          f"预算 {goal['framework'].get('budget_kcal')} kcal")
+          f"预算 {goal.get('framework', {}).get('budget_kcal')} kcal")
     gid = goal["id"]
 
-    r = client.get("/api/plans/today", params={"user_id": u1["user_id"]})
+    r = client.get("/api/plans/today", params={"account_id": a1})
     check("今日计划首次拉取触发懒生成", r.json()["generating"] is True)
     # TestClient 内联跑完 BackgroundTasks：重拉即收敛出确定性桩条目
-    r = client.get("/api/plans/today", params={"user_id": u1["user_id"]})
+    r = client.get("/api/plans/today", params={"account_id": a1})
     plan = r.json()
     ai_items = [i for i in plan["items"] if i["source"] == "ai"]
     check("今日计划收敛出 AI 条目",
@@ -329,38 +333,42 @@ def run_all(client: TestClient) -> None:
           ai_items[0]["content"] if ai_items else "无条目")
 
     r = client.put(f"/api/plans/items/{ai_items[0]['id']}",
-                   json={"user_id": u1["user_id"], "done": True})
+                   json={"account_id": a1, "done": True})
     check("计划条目打勾", r.status_code == 200)
-    items = client.get("/api/plans/today", params={"user_id": u1["user_id"]}).json()["items"]
+    items = client.get("/api/plans/today", params={"account_id": a1}).json()["items"]
     check("打勾状态落库", any(i["id"] == ai_items[0]["id"] and i["done"] for i in items))
 
     r = client.post("/api/ledger/expenses", json={
-        "user_id": u1["user_id"], "amount_fen": 3550, "category": "餐饮", "merchant": "麦当劳"})
+        "account_id": a1, "amount_fen": 3550, "category": "餐饮", "merchant": "麦当劳"})
     check("手动记账直接入账", r.status_code == 200 and r.json()["status"] == "confirmed")
     month = plan["date"][:7]
     bill = client.get("/api/ledger/expenses",
-                      params={"user_id": u1["user_id"], "month": month}).json()
+                      params={"account_id": a1, "month": month}).json()
     check("月账单合计正确", bill["month_total_fen"] == 3550, f"当月 {len(bill['items'])} 笔")
 
-    r = client.post("/api/calories", json={"user_id": u1["user_id"], "total_kcal": 2000, "note": "放纵餐"})
+    r = client.post("/api/calories", json={"account_id": a1, "total_kcal": 2000, "note": "放纵餐"})
     adj = r.json().get("adjustment")
     check("手动热量确认触发超预算联动", r.status_code == 200 and adj is not None,
           f"超 {adj['over_kcal']} kcal" if adj else "未联动")
-    items = client.get("/api/plans/today", params={"user_id": u1["user_id"]}).json()["items"]
+    items = client.get("/api/plans/today", params={"account_id": a1}).json()["items"]
     adjust_items = [i for i in items if i["source"] == "adjust"]
     check("今日计划出现运动补偿 adjust 条目",
           len(adjust_items) == 1 and "超预算" in adjust_items[0]["content"],
           adjust_items[0]["content"][:40] if adjust_items else "无")
 
-    r = client.get(f"/api/goals/circle/{cid}", params={"viewer_id": u2["user_id"]})
+    # 共享是类别级开关（self_sharing）：开了 goal 共享，圈友才可见（progress 档裁掉明细）
+    r = client.put("/api/self/sharing",
+                   json={"account_id": a1, "circle_id": cid, "category": "goal"})
+    check("开启目标共享（goal × 本圈）", r.status_code == 200)
+    r = client.get(f"/api/goals/circle/{cid}", params={"account_id": a2})
     pub = [g for g in r.json()["goals"] if g["id"] == gid]
-    check("圈内公开目标列表可见（summary 粒度）",
+    check("圈内共享目标可见（progress 粒度）",
           r.status_code == 200 and len(pub) == 1 and "params" not in pub[0],
           pub[0]["title"] if pub else "未找到")
 
-    r = client.post(f"/api/goals/{gid}/nudges", json={"user_id": u2["user_id"], "message": "别喝奶茶了"})
+    r = client.post(f"/api/goals/{gid}/nudges", json={"account_id": a2, "message": "别喝奶茶了"})
     check("圈友鞭策成功", r.status_code == 200 and r.json()["status"] == "sent")
-    r = client.post(f"/api/goals/{gid}/nudges", json={"user_id": u2["user_id"], "message": "再来"})
+    r = client.post(f"/api/goals/{gid}/nudges", json={"account_id": a2, "message": "再来"})
     check("同日第二次鞭策 429 限频", r.status_code == 429)
 
     print(f"\n🎉 全部通过：{PASSED} 项断言")

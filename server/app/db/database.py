@@ -1,5 +1,6 @@
 """SQLite 连接与 schema。embedding 以 float32 blob 存储，检索时 numpy 暴力余弦。"""
 import json
+import logging
 import random
 import sqlite3
 import threading
@@ -8,6 +9,8 @@ from pathlib import Path
 import numpy as np
 
 from ..config import settings
+
+logger = logging.getLogger("us.db")
 
 _local = threading.local()
 
@@ -444,6 +447,7 @@ def _seed_food_nutrition() -> None:
 
     vendor 文件随仓库分发（scripts/import_food_nutrition.py 产出），部署自包含；
     已有数据的库启动时直接跳过，不重复灌入。
+    未配置 embedding 或灌入失败时跳过（不阻塞启动）：表仍为空，下次启动自动重试。
     """
     conn = get_conn()
     if conn.execute("SELECT COUNT(*) AS c FROM food_nutrition").fetchone()["c"]:
@@ -454,20 +458,30 @@ def _seed_food_nutrition() -> None:
     from .. import ai  # 延迟导入：ai 依赖 config，避免模块加载顺序成环
 
     rows = json.loads(assets.read_text(encoding="utf-8"))
-    for r in rows:
-        conn.execute(
-            """INSERT OR IGNORE INTO food_nutrition
-               (name, kcal_per_100g, protein_per_100g, fat_per_100g, cho_per_100g, embedding)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+    try:
+        # 批量取向量再一次性落库：几次请求代替逐条几百次（分钟级 → 秒级），
+        # 且中途失败不留半灌入状态（见 docs/BUG记录.md BUG-015）
+        vecs = ai.embed_texts([r["name"] for r in rows])
+        values = [
             (
                 r["name"],
                 r["kcal_per_100g"],
                 r.get("protein_per_100g"),
                 r.get("fat_per_100g"),
                 r.get("cho_per_100g"),
-                encode_embedding(ai.embed_text(r["name"])),
-            ),
-        )
+                encode_embedding(v),
+            )
+            for r, v in zip(rows, vecs)
+        ]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("食物成分表灌入跳过（不影响启动，下次启动自动重试）：%s", exc)
+        return
+    conn.executemany(
+        """INSERT OR IGNORE INTO food_nutrition
+           (name, kcal_per_100g, protein_per_100g, fat_per_100g, cho_per_100g, embedding)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        values,
+    )
 
 
 # ---------- 恢复码 ----------
