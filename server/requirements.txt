@@ -9,3 +9,9 @@ readability-lxml==0.8.1
 lxml_html_clean==0.4.1
 pytest==8.3.4
 pywebpush==2.4.0
+# --- Agent 化依赖白名单（见 AGENTS.md「硬约束」，仅以下例外，不再扩散）---
+langgraph==1.2.11                    # 树洞/评审团图编排
+langmem==0.0.30                      # L1 记忆抽取（仅真实模式；测试走 tests/fakes 确定性桩）
+langgraph-checkpoint-sqlite==3.1.1   # 树洞会话状态 SqliteSaver（checkpoint 落同一个 app.db）
+langchain-openai==1.5.2              # langmem 的 OpenAI 兼容模型适配（接 settings 的 LLM_* 配置）
+# langchain-core 由 langgraph/langmem 传递引入，业务代码不直接依赖

@@ -1,4 +1,12 @@
-"""AI 统一接口：按 key 是否存在自动选择真实 API 或 mock 桩。"""
+"""AI 统一接口：直连真实 provider，未配置即报清晰错误，不再回退桩数据。
+
+- LLM/EMBEDDING 未配置（缺 key）：抛 AINotConfiguredError——同步路由由 main.py 转 503，
+  后台任务经 tasks.run_task 记 failed（error 写明未配置）
+- 视觉未配置（VISION_MODEL 空）：优雅跳过（caption 返回 ""，识别返回 None → 路由 400）
+- 真实调用失败：按场景抛错（任务层记 failed）或走「无桩数据」的降级路径并记 degraded
+  （视觉跳过、共同愿望仅相似度、记忆写回跳过——均不产假数据）
+- 测试不经过本模块的真实分支：conftest.py 把门面函数整体换成 tests/fakes.py 确定性桩
+"""
 import json
 import logging
 import threading
@@ -6,7 +14,7 @@ import threading
 import numpy as np
 
 from ..config import settings
-from . import embedding, llm, mock, vision
+from . import embedding, llm, vision
 from .prompts import (
     DAILY_PLAN_PROMPT,
     DEFAULT_PERSONA,
@@ -24,27 +32,43 @@ from .prompts import (
     SUMMARY_PROMPT,
     USER_PROFILE_PROMPT,
     VENTING_NEGATIVE_PERSONA,
+    WEB_SEARCH_FOOD_PROMPT,
     WEEKLY_REPORT_PROMPT,
     WISH_MATCH_PROMPT,
 )
 
 logger = logging.getLogger("us.ai")
 
-# 真实调用失败回退 mock 的标记（线程本地）：任务层据此把运行记为 degraded，不再静默
+
+class AINotConfiguredError(RuntimeError):
+    """LLM/EMBEDDING 未配置（缺 API key）：同步路由 503，后台任务记 failed。"""
+
+
+def _require_llm() -> None:
+    if not settings.LLM_API_KEY:
+        raise AINotConfiguredError("未配置 LLM（LLM_API_KEY 为空），AI 文本能力不可用")
+
+
+def _require_embedding() -> None:
+    if not settings.EMBEDDING_API_KEY:
+        raise AINotConfiguredError(
+            "未配置 EMBEDDING（EMBEDDING_API_KEY 与回退的 LLM_API_KEY 均为空），向量能力不可用"
+        )
+
+
+# 降级标记（线程本地）：走了「无桩数据」的降级路径时置位，任务层据此把运行记为 degraded
 _state = threading.local()
 
 
-def reset_mock_signal() -> None:
-    """任务层在每次尝试前清零回退标记。"""
-    _state.used_mock = False
+def reset_degraded_signal() -> None:
+    """任务层在每次尝试前清零降级标记。"""
+    _state.degraded = False
 
 
-def last_call_used_mock() -> bool:
-    """自上次 reset_mock_signal() 以来，是否有真实 AI 调用失败回退 mock。
+def last_call_degraded() -> bool:
+    """自上次 reset_degraded_signal() 以来，是否有调用走了降级路径（视觉跳过/仅相似度等）。"""
+    return getattr(_state, "degraded", False)
 
-    只统计「配了 key 但调用失败」的回退路径；纯 mock 模式（没配 key）是配置使然，不算降级。
-    """
-    return getattr(_state, "used_mock", False)
 
 _DEFAULT_CLASSIFY = {
     "type": "text",
@@ -57,59 +81,42 @@ _DEFAULT_CLASSIFY = {
 
 
 def mode() -> dict:
-    return {"llm": "mock" if settings.llm_mock else "real",
-            "embedding": "mock" if settings.embed_mock else "real",
+    """配置巡检：各组 configured/missing（视觉报 on/off）。只报配置与否，不代表已连通。"""
+    return {"llm": "configured" if settings.LLM_API_KEY else "missing",
+            "embedding": "configured" if settings.EMBEDDING_API_KEY else "missing",
             "vision": "on" if settings.vision_enabled else "off"}
 
 
 def classify_fragment(content: str) -> dict:
-    if settings.llm_mock:
-        return mock.classify(content)
-    try:
-        result = llm.chat_json(FRAGMENT_CLASSIFY_PROMPT.format(content=content))
-        merged = {**_DEFAULT_CLASSIFY, **{k: v for k, v in result.items() if k in _DEFAULT_CLASSIFY}}
-        merged["wish_category"] = merged["wish_category"] or ""
-        merged["tags"] = list(merged.get("tags") or [])[:3]
-        return merged
-    except Exception as exc:  # noqa: BLE001
-        _state.used_mock = True
-        logger.warning("LLM 分类失败，回退 mock：%s", exc)
-        return mock.classify(content)
+    _require_llm()
+    result = llm.chat_json(FRAGMENT_CLASSIFY_PROMPT.format(content=content))
+    merged = {**_DEFAULT_CLASSIFY, **{k: v for k, v in result.items() if k in _DEFAULT_CLASSIFY}}
+    merged["wish_category"] = merged["wish_category"] or ""
+    merged["tags"] = list(merged.get("tags") or [])[:3]
+    return merged
 
 
 def embed_text(text: str) -> np.ndarray:
-    if settings.embed_mock:
-        return mock.embed(text)
-    try:
-        return embedding.embed(text)
-    except Exception as exc:  # noqa: BLE001
-        _state.used_mock = True
-        logger.warning("文本 embedding 失败，回退 mock：%s", exc)
-        return mock.embed(text)
+    _require_embedding()
+    return embedding.embed(text)
 
 
 def image_caption(image_bytes: bytes, fmt: str = "jpeg") -> str:
-    """图片 caption：视觉关闭（未配 key / 未配 VISION_MODEL，含 mock 模式）返回空跳过；
+    """图片 caption：视觉关闭（未配 key / 未配 VISION_MODEL）返回空跳过；
     调用失败同样优雅跳过（记 degraded，不影响任何现有功能）。"""
     if not settings.vision_enabled:
         return ""
     try:
-        return vision.vision_caption(image_bytes, fmt)
+        return vision.vision_caption(image_bytes, fmt, reasoning=settings.vision_reasoning("caption"))
     except Exception as exc:  # noqa: BLE001
-        _state.used_mock = True
+        _state.degraded = True
         logger.warning("vision caption 失败，跳过：%s", exc)
         return ""
 
 
 def summarize_text(text: str) -> str:
-    if settings.llm_mock:
-        return mock.summarize(text)
-    try:
-        return llm.chat(SUMMARY_PROMPT.format(text=text[:4000])).strip()
-    except Exception as exc:  # noqa: BLE001
-        _state.used_mock = True
-        logger.warning("LLM 摘要失败，回退 mock：%s", exc)
-        return mock.summarize(text)
+    _require_llm()
+    return llm.chat(SUMMARY_PROMPT.format(text=text[:4000])).strip()
 
 
 def format_style_digest(nickname: str, profile: dict) -> str:
@@ -158,33 +165,30 @@ def generate_weekly_report(
     quotes: list[str] | None = None,
     styles: list[str] | None = None,
 ) -> str:
-    if settings.llm_mock:
-        return mock.weekly_report(fragments_repr, week_start, week_end, stats)
-    try:
-        prompt = build_weekly_prompt(fragments_repr, week_start, week_end, persona, quotes, styles)
-        return llm.chat(prompt, timeout=120.0)
-    except Exception as exc:  # noqa: BLE001
-        _state.used_mock = True
-        logger.warning("LLM 周报失败，回退 mock：%s", exc)
-        return mock.weekly_report(fragments_repr, week_start, week_end, stats)
+    _require_llm()
+    prompt = build_weekly_prompt(fragments_repr, week_start, week_end, persona, quotes, styles)
+    return llm.chat(prompt, timeout=120.0)
 
 
 def confirm_common_wishes(wishes_repr: str) -> list[dict]:
-    """LLM 按 PRD 6.3 确认共同愿望；mock 模式返回空列表（调用方只用相似度）。"""
-    if settings.llm_mock:
+    """LLM 按 PRD 6.3 确认共同愿望；未配置或调用失败返回空列表（调用方只用相似度，记 degraded）。"""
+    if not settings.LLM_API_KEY:
+        _state.degraded = True
         return []
     try:
         # 确认在后台重算里跑，放宽到 120s（默认 60s 曾 read timeout 回退相似度，BUG-008）
         result = llm.chat_json(WISH_MATCH_PROMPT.format(wishes=wishes_repr), timeout=120.0)
         return list(result.get("common_wishes", []))
     except Exception as exc:  # noqa: BLE001
-        _state.used_mock = True
+        _state.degraded = True
         logger.warning("LLM 愿望匹配失败，回退仅用相似度：%s", exc)
         return []
 
 
 def wish_suggestion(content: str, users: list[str]) -> str:
-    return mock.wish_suggestion(content, users)
+    """共同愿望建议：纯模板拼装，不过 LLM。"""
+    names = "和".join(users)
+    return f"{names}可以这周末先约个时间碰头，把「{content}」具体聊一聊，定个小目标就开始。"
 
 
 def extract_plan_query(content: str) -> dict:
@@ -192,34 +196,27 @@ def extract_plan_query(content: str) -> dict:
 
     实现路径由 PLAN_KINDS 按 kind 写死，LLM 只选类型。kind 非法回退 activity；
     need_real_data 与 keywords 联动——没有可搜的品类词就不查（防人名当 POI）。
-    失败回退「原文当关键词 + activity」的旧行为。
     """
-    if settings.llm_mock:
-        return mock.extract_plan_query(content)
-    try:
-        result = llm.chat_json(PLAN_EXTRACT_PROMPT.format(wish=content))
-        need = result.get("need_real_data", True)
-        if isinstance(need, str):  # 防御 LLM 把布尔写成字符串
-            need = need.strip().lower() in ("true", "1", "是")
-        keywords = str(result.get("keywords", "")).strip()[:20]
-        kind = str(result.get("kind", "")).strip().lower()
-        if kind not in PLAN_KINDS:
-            kind = "activity"
-        mood = str(result.get("mood", "")).strip().lower()
-        if mood not in ("negative", "neutral", "playful"):
-            mood = "neutral"
-        return {
-            "kind": kind,
-            "scene": str(result.get("scene", "")).strip()[:50],
-            "city": str(result.get("city", "")).strip(),
-            "keywords": keywords,
-            "need_real_data": bool(need) and bool(keywords),
-            "mood": mood,
-        }
-    except Exception as exc:  # noqa: BLE001
-        _state.used_mock = True
-        logger.warning("LLM 愿望分析失败，回退原文关键词：%s", exc)
-        return mock.extract_plan_query(content)
+    _require_llm()
+    result = llm.chat_json(PLAN_EXTRACT_PROMPT.format(wish=content))
+    need = result.get("need_real_data", True)
+    if isinstance(need, str):  # 防御 LLM 把布尔写成字符串
+        need = need.strip().lower() in ("true", "1", "是")
+    keywords = str(result.get("keywords", "")).strip()[:20]
+    kind = str(result.get("kind", "")).strip().lower()
+    if kind not in PLAN_KINDS:
+        kind = "activity"
+    mood = str(result.get("mood", "")).strip().lower()
+    if mood not in ("negative", "neutral", "playful"):
+        mood = "neutral"
+    return {
+        "kind": kind,
+        "scene": str(result.get("scene", "")).strip()[:50],
+        "city": str(result.get("city", "")).strip(),
+        "keywords": keywords,
+        "need_real_data": bool(need) and bool(keywords),
+        "mood": mood,
+    }
 
 
 def _format_real_data(real_data: dict | None) -> str:
@@ -288,41 +285,29 @@ def generate_plan(
     real_data: dict | None = None,
     analysis: dict | None = None,
 ) -> dict:
-    if settings.llm_mock:
-        return mock.generate_plan(content, users)
-    try:
-        prompt = build_plan_prompt(content, users, real_data, analysis)
-        result = llm.chat_json(prompt)
-        return {
-            "time": result.get("time", ""),
-            "location": result.get("location", ""),
-            "budget": result.get("budget", ""),
-            "steps": list(result.get("steps", [])),
-            "links": [x for x in result.get("links", []) if isinstance(x, dict) and x.get("url")],
-            "disclaimer": result.get("disclaimer", ""),
-        }
-    except Exception as exc:  # noqa: BLE001
-        _state.used_mock = True
-        logger.warning("LLM 方案失败，回退 mock：%s", exc)
-        return mock.generate_plan(content, users)
+    _require_llm()
+    prompt = build_plan_prompt(content, users, real_data, analysis)
+    result = llm.chat_json(prompt)
+    return {
+        "time": result.get("time", ""),
+        "location": result.get("location", ""),
+        "budget": result.get("budget", ""),
+        "steps": list(result.get("steps", [])),
+        "links": [x for x in result.get("links", []) if isinstance(x, dict) and x.get("url")],
+        "disclaimer": result.get("disclaimer", ""),
+    }
 
 
 def generate_user_profile(nickname: str, stats: dict, excerpts: list[str] | None = None) -> dict:
-    """画像蒸馏：LLM 生成结构化画像 JSON（含 style 说话风格），失败回退 mock 模板拼装。"""
+    """画像蒸馏：LLM 生成结构化画像 JSON（含 style 说话风格）；未配置/失败直接抛错。"""
     excerpts = excerpts or []
-    if settings.llm_mock:
-        return mock.user_profile(nickname, stats, excerpts)
-    try:
-        prompt = USER_PROFILE_PROMPT.format(
-            nickname=nickname,
-            stats=json.dumps(stats, ensure_ascii=False),
-            excerpts="\n".join(f"- {e}" for e in excerpts) or "（暂无公开发言摘录）",
-        )
-        return dict(llm.chat_json(prompt))
-    except Exception as exc:  # noqa: BLE001
-        _state.used_mock = True
-        logger.warning("LLM 画像失败，回退 mock：%s", exc)
-        return mock.user_profile(nickname, stats, excerpts)
+    _require_llm()
+    prompt = USER_PROFILE_PROMPT.format(
+        nickname=nickname,
+        stats=json.dumps(stats, ensure_ascii=False),
+        excerpts="\n".join(f"- {e}" for e in excerpts) or "（暂无公开发言摘录）",
+    )
+    return dict(llm.chat_json(prompt))
 
 
 def build_plan_chat_prompt(
@@ -363,36 +348,24 @@ def plan_chat(
     member_styles: list[str] | None = None,
 ) -> str:
     """方案追问：上下文 = 愿望 + 已定方案 + 圈内公开语录 + 画像（viewer-relative）+ 近 10 条对话。"""
-    if settings.llm_mock:
-        return mock.plan_chat(wish, message)
-    try:
-        prompt = build_plan_chat_prompt(
-            wish, participants, plan, quotes, history, message, viewer_profile, member_styles
-        )
-        return llm.chat(prompt).strip()
-    except Exception as exc:  # noqa: BLE001
-        _state.used_mock = True
-        logger.warning("LLM 方案追问失败，回退 mock：%s", exc)
-        return mock.plan_chat(wish, message)
+    _require_llm()
+    prompt = build_plan_chat_prompt(
+        wish, participants, plan, quotes, history, message, viewer_profile, member_styles
+    )
+    return llm.chat(prompt).strip()
 
 
 def generate_pair_summary(name_a: str, name_b: str, levels: dict, topics: list[str], wish_count: int) -> str:
     """关系摘要：基于分量等级与共同主题生成，正向叙事、不出现分数。"""
-    if settings.llm_mock:
-        return mock.pair_summary(name_a, name_b, topics, wish_count)
-    try:
-        prompt = PAIR_SUMMARY_PROMPT.format(
-            name_a=name_a,
-            name_b=name_b,
-            topics="、".join(topics) or "（还没有共同主题）",
-            wish_count=wish_count,
-            levels=json.dumps(levels, ensure_ascii=False),
-        )
-        return llm.chat(prompt).strip()
-    except Exception as exc:  # noqa: BLE001
-        _state.used_mock = True
-        logger.warning("LLM 关系摘要失败，回退 mock：%s", exc)
-        return mock.pair_summary(name_a, name_b, topics, wish_count)
+    _require_llm()
+    prompt = PAIR_SUMMARY_PROMPT.format(
+        name_a=name_a,
+        name_b=name_b,
+        topics="、".join(topics) or "（还没有共同主题）",
+        wish_count=wish_count,
+        levels=json.dumps(levels, ensure_ascii=False),
+    )
+    return llm.chat(prompt).strip()
 
 
 # ---------- 个人功能：账单识别 / 热量识别 / 当日计划 / 存款建议 ----------
@@ -400,18 +373,18 @@ def generate_pair_summary(name_a: str, name_b: str, levels: dict, topics: list[s
 
 def recognize_receipt(image_path: str) -> list[dict] | None:
     """小票/支付截图识别（一图多笔）：视觉关闭返回 None 优雅跳过（配置使然，不算降级）；
-    调用失败回退 mock 桩并记 degraded。"""
+    调用失败同样返回 None 并记 degraded（调用方按「识别不可用」提示手动录入）。"""
     if not settings.vision_enabled:
         return None
     try:
-        result = vision.vision_json(image_path, RECEIPT_PROMPT)
+        result = vision.vision_json(image_path, RECEIPT_PROMPT, reasoning=settings.vision_reasoning("receipt"))
         if not isinstance(result, list):
             raise ValueError(f"账单识别应返回数组，实际为 {type(result).__name__}")
         return result
     except Exception as exc:  # noqa: BLE001
-        _state.used_mock = True
-        logger.warning("账单识别失败，回退 mock：%s", exc)
-        return mock.receipt_recognition()
+        _state.degraded = True
+        logger.warning("账单识别失败，按未配置口径跳过：%s", exc)
+        return None
 
 
 def recognize_food(image_path: str, hint: str = "") -> dict | None:
@@ -422,14 +395,56 @@ def recognize_food(image_path: str, hint: str = "") -> dict | None:
     if not settings.vision_enabled:
         return None
     try:
-        result = vision.vision_json(image_path, FOOD_PROMPT.format(hint=hint))
+        result = vision.vision_json(
+            image_path, FOOD_PROMPT.format(hint=hint), reasoning=settings.vision_reasoning("food")
+        )
         if not isinstance(result, dict):
             raise ValueError(f"食物识别应返回对象，实际为 {type(result).__name__}")
         return result
     except Exception as exc:  # noqa: BLE001
-        _state.used_mock = True
-        logger.warning("食物识别失败，回退 mock：%s", exc)
-        return mock.food_recognition()
+        _state.degraded = True
+        logger.warning("食物识别失败，按未配置口径跳过：%s", exc)
+        return None
+
+
+def _opt_macro(raw) -> float | None:
+    """宏量营养素可空值规整：非法/越界（>100g）一律当缺失。"""
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return v if 0 <= v <= 100 else None
+
+
+def web_search_food(name: str, brand: str = "") -> dict | None:
+    """联网查食物每 100g 营养（营养共建信任管线的核验/兜底数据源）。
+
+    brand 非空时按品牌款精准查（包装营养标签口径）。降级链：LLM_WEB_SEARCH≠on
+    （默认 off）→ None（不联网）；未配置 LLM / 调用失败 / 结果非法 → None。
+    """
+    name = (name or "").strip()
+    brand = (brand or "").strip()
+    if not name or not settings.web_search_enabled or not settings.LLM_API_KEY:
+        return None
+    try:
+        # enable_search 是厂商相关参数（阿里百炼写法），厂商不支持会忽略/报错 → 走降级
+        brand_hint = f"品牌：{brand}。" if brand else ""
+        result = llm.chat_json(
+            WEB_SEARCH_FOOD_PROMPT.format(name=name, brand_hint=brand_hint), enable_search=True
+        )
+        kcal = float(result.get("kcal_per_100g"))
+        if not 0 < kcal <= 1000:
+            raise ValueError(f"联网返回的 kcal_per_100g 越界：{kcal}")
+        return {
+            "kcal_per_100g": kcal,
+            "protein_per_100g": _opt_macro(result.get("protein_per_100g")),
+            "fat_per_100g": _opt_macro(result.get("fat_per_100g")),
+            "cho_per_100g": _opt_macro(result.get("cho_per_100g")),
+        }
+    except Exception as exc:  # noqa: BLE001
+        # 联网核验失败不算 degraded：off/失败都有明确降级路径（模型估值/待核实），不污染任务层标记
+        logger.warning("联网查询食物营养失败，降级：%s", exc)
+        return None
 
 
 def generate_daily_plan(goal_type: str, framework: dict, context: dict) -> list[dict]:
@@ -439,37 +454,147 @@ def generate_daily_plan(goal_type: str, framework: dict, context: dict) -> list[
     """
     yesterday = str((context or {}).get("yesterday") or "")
     progress = str((context or {}).get("progress") or "")
-    if settings.llm_mock:
-        return mock.daily_plan(goal_type, framework, yesterday, progress)
-    try:
-        prompt = DAILY_PLAN_PROMPT.format(
-            goal_type=goal_type,
-            framework=json.dumps(framework, ensure_ascii=False),
-            yesterday=yesterday or "（无记录）",
-            progress=progress or "（暂无）",
-        )
-        result = llm.chat_json(prompt)
-        # prompt 要求裸数组，但 json_object 模式下模型可能包一层对象，兼容取第一个数组值
-        items = result if isinstance(result, list) else next(
-            (v for v in result.values() if isinstance(v, list)), None
-        )
-        if items is None:
-            raise ValueError("当日计划返回中找不到条目数组")
-        return [item for item in items if isinstance(item, dict)]
-    except Exception as exc:  # noqa: BLE001
-        _state.used_mock = True
-        logger.warning("LLM 当日计划失败，回退 mock：%s", exc)
-        return mock.daily_plan(goal_type, framework, yesterday, progress)
+    _require_llm()
+    prompt = DAILY_PLAN_PROMPT.format(
+        goal_type=goal_type,
+        framework=json.dumps(framework, ensure_ascii=False),
+        yesterday=yesterday or "（无记录）",
+        progress=progress or "（暂无）",
+    )
+    result = llm.chat_json(prompt)
+    # prompt 要求裸数组，但 json_object 模式下模型可能包一层对象，兼容取第一个数组值
+    items = result if isinstance(result, list) else next(
+        (v for v in result.values() if isinstance(v, list)), None
+    )
+    if items is None:
+        raise ValueError("当日计划返回中找不到条目数组")
+    return [item for item in items if isinstance(item, dict)]
 
 
 def generate_savings_advice(settlement: dict) -> str:
-    """存款月度结算建议：数字全由规则算好，LLM 只说人话；失败回退 mock 模板文案。"""
-    if settings.llm_mock:
-        return mock.savings_advice(settlement)
+    """存款月度结算建议：数字全由规则算好，LLM 只说人话；未配置/失败直接抛错。"""
+    _require_llm()
+    prompt = SAVINGS_ADVICE_PROMPT.format(settlement=json.dumps(settlement, ensure_ascii=False))
+    return llm.chat(prompt).strip()
+
+
+# ---------- 情绪树洞（Agent 化改造）：真实模式走 langgraph/langmem，测试由 fakes 接管 ----------
+
+from .prompts import (  # noqa: E402
+    TREEHOLE_COMPRESS_PROMPT,
+    TREEHOLE_REPLY_PROMPT,
+    TREEHOLE_REWRITE_PROMPT,
+    TREEHOLE_ROUTE_PROMPT,
+    TREEHOLE_TOOLS_PROMPT,
+)
+
+TREEHOLE_INTENTS = ("vent", "question", "data")
+
+
+def treehole_route(message: str) -> str:
+    """① 意图路由：vent/question/data；非法输出回退 vent（倾诉是最安全的口径）。"""
+    _require_llm()
+    intent = llm.chat(TREEHOLE_ROUTE_PROMPT.format(message=message), timeout=30.0).strip().lower()
+    return intent if intent in TREEHOLE_INTENTS else "vent"
+
+
+def treehole_rewrite(message: str) -> str:
+    """② 查询改写：情绪化输入 → 检索友好 query。"""
+    _require_llm()
+    return llm.chat(TREEHOLE_REWRITE_PROMPT.format(message=message), timeout=30.0).strip()[:50]
+
+
+def treehole_tool_plan(message: str, intent: str, tools_desc: str, results: list[dict]) -> dict:
+    """③ 工具决策（tool calling 循环的一轮）：返回 {"calls": [{"name", "args"}]}。"""
+    import json as _json
+
+    _require_llm()
+    result = llm.chat_json(TREEHOLE_TOOLS_PROMPT.format(
+        tools=tools_desc, message=message, intent=intent,
+        results=_json.dumps(results, ensure_ascii=False) or "（无）",
+    ), timeout=30.0)
+    calls = [
+        {"name": str(c.get("name", "")), "args": dict(c.get("args") or {})}
+        for c in result.get("calls") or []
+        if isinstance(c, dict) and c.get("name")
+    ]
+    return {"calls": calls}
+
+
+def treehole_reply(payload: dict) -> str:
+    """④ 人设扮演生成。payload 由图组装：persona/profile/atoms/hits/summary/
+    tool_results/history/message/intent；单 prompt 成稿。"""
+    import json as _json
+
+    _require_llm()
+    intent_labels = {"vent": "倾诉（先共情接住）", "question": "提问（给具体建议）",
+                     "data": "查数据（如实使用工具结果）"}
+    persona = payload.get("persona") or {}
+    persona_text = "\n".join(
+        f"- {label}：{persona.get(key)}" for key, label in (
+            ("name", "名字"), ("personality", "性格"), ("speaking_style", "说话风格"),
+            ("relationship", "与用户的关系"), ("background", "背景设定"),
+        ) if persona.get(key)
+    ) or "名字：树洞；性格：温和耐心的倾听者；与用户的关系：最信得过的朋友"
+    prompt = TREEHOLE_REPLY_PROMPT.format(
+        persona=persona_text,
+        profile=_json.dumps(payload.get("profile") or {}, ensure_ascii=False) or "（暂无画像）",
+        atoms="\n".join(f"- {a['content']}" for a in payload.get("atoms") or []) or "（暂无）",
+        hits="\n".join(
+            f"- [{h.get('created_at', '')[:10]}] {h.get('excerpt', '')}（来源 id：{h.get('id', '')}）"
+            for h in payload.get("hits") or []
+        ) or "（本次未命中）",
+        summary_block=(
+            "【较早历史的滚动摘要】\n" + _json.dumps(payload["summary"], ensure_ascii=False)
+            if payload.get("summary") else ""
+        ),
+        tool_results=_json.dumps(payload.get("tool_results") or [], ensure_ascii=False),
+        history="\n".join(
+            f"{'用户' if h.get('role') == 'user' else '你'}：{h.get('content', '')}"
+            for h in payload.get("history") or []
+        ) or "（这是开场第一句）",
+        message=payload.get("message") or "",
+        intent_label=intent_labels.get(payload.get("intent") or "vent", "倾诉"),
+    )
+    return llm.chat(prompt, timeout=60.0).strip()
+
+
+def treehole_compress(old_summary: dict, messages: list[dict]) -> dict:
+    """⑥ 滚动增量摘要（填槽式：facts/emotion_trail/followups/time_anchors，带源消息 id）。
+
+    压缩失败保留旧摘要并记 degraded（回复已生成，不为写回牺牲当轮），下轮攒够再压。
+    """
+    import json as _json
+
+    _require_llm()
     try:
-        prompt = SAVINGS_ADVICE_PROMPT.format(settlement=json.dumps(settlement, ensure_ascii=False))
-        return llm.chat(prompt).strip()
+        result = llm.chat_json(TREEHOLE_COMPRESS_PROMPT.format(
+            old_summary=_json.dumps(old_summary or {}, ensure_ascii=False),
+            messages=_json.dumps(messages, ensure_ascii=False),
+        ), timeout=60.0)
+        return {
+            "facts": [f for f in result.get("facts") or [] if isinstance(f, dict)][:20],
+            "emotion_trail": str(result.get("emotion_trail") or "")[:200],
+            "followups": [f for f in result.get("followups") or [] if isinstance(f, dict)][:10],
+            "time_anchors": [f for f in result.get("time_anchors") or [] if isinstance(f, dict)][:10],
+        }
     except Exception as exc:  # noqa: BLE001
-        _state.used_mock = True
-        logger.warning("LLM 存款建议失败，回退 mock：%s", exc)
-        return mock.savings_advice(settlement)
+        _state.degraded = True
+        logger.warning("LLM 树洞滚动摘要失败，保留旧摘要：%s", exc)
+        return dict(old_summary or {})
+
+
+def extract_memory_atoms(user_message: str, assistant_reply: str = "") -> list[dict]:
+    """⑥ L1 原子记忆抽取：真实模式走 langmem（模型适配见 ai/langmem_ext）。
+
+    抽取失败记 degraded 并返回空（记忆写回跳过，不拖垮当轮回复），不产桩数据。
+    """
+    _require_llm()
+    try:
+        from . import langmem_ext
+
+        return langmem_ext.extract_atoms(user_message, assistant_reply)
+    except Exception as exc:  # noqa: BLE001
+        _state.degraded = True
+        logger.warning("langmem 记忆抽取失败，本轮跳过写回：%s", exc)
+        return []

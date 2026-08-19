@@ -150,7 +150,7 @@ configure_env() {
     ok "非交互模式，跳过询问，直接使用现有 .env"
   else
     echo ""
-    echo "  接下来询问 API key，直接回车保留当前值（留空则 AI 走 mock 本地桩）。"
+    echo "  接下来询问 API key，直接回车保留当前值。"
     echo "  三组参数（LLM/EMBEDDING/VISION）同厂商时只需填 LLM_API_KEY，其余自动回退。"
     local input
     printf '  LLM_API_KEY 当前 %s，新值：' "$(mask "$llm_key")"
@@ -160,8 +160,7 @@ configure_env() {
   fi
 
   if [ -z "$llm_key" ]; then
-    warn "LLM_API_KEY 未填写，AI 能力将运行于 mock 模式（本地桩，功能完整但智能程度有限）。"
-    echo "      - 分类/摘要/周报/方案走 mock，embedding 走 mock（语义检索精度下降）"
+    warn "LLM_API_KEY 未填写：分类/摘要/周报/方案/检索等 AI 能力不可用（接口将报未配置错误）。"
     echo "      之后随时编辑 $env_file 补填，再重跑本脚本即可生效。"
   else
     ok "LLM_API_KEY 已配置"

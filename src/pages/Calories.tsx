@@ -23,7 +23,7 @@ function equivList(eq?: Record<string, ExerciseEquiv>): ExerciseEquiv[] {
 /** 待确认卡（识别时已落库 pending 行，带 id；确认时只回传 id + 可改的总热量/备注） */
 interface PendingEntry {
   id: string
-  items: { name: string; kcal: number }[]
+  items: { name: string; kcal: number; brand?: string; grams?: number; source?: string; staging_id?: number }[]
   total: string
   note: string
   exercise_equiv: Record<string, ExerciseEquiv>
@@ -47,6 +47,13 @@ export default function Calories({ accountId }: { accountId: string }) {
   const [mNote, setMNote] = useState("")
   const [manualBusy, setManualBusy] = useState(false)
   const [submitError, setSubmitError] = useState("")
+  // 手动加食物（营养共建：入 staging 预数据库，后台联网核验）
+  const [fName, setFName] = useState("")
+  const [fBrand, setFBrand] = useState("")
+  const [fKcal, setFKcal] = useState("")
+  const [fPortion, setFPortion] = useState("")
+  const [foodBusy, setFoodBusy] = useState(false)
+  const [foodMsg, setFoodMsg] = useState("")
   // 超预算联动提示（服务端确认/手动入账后返回 adjustment）
   const [adjustNotice, setAdjustNotice] = useState("")
 
@@ -75,7 +82,14 @@ export default function Calories({ accountId }: { accountId: string }) {
       const entry = await api.recognizeFood(accountId, url, hint.trim() || undefined)
       setPending({
         id: entry.id,
-        items: (entry.items ?? []).map((x) => ({ name: x.name, kcal: x.kcal })),
+        items: (entry.items ?? []).map((x) => ({
+          name: x.name,
+          kcal: x.kcal,
+          brand: x.brand,
+          grams: x.grams,
+          source: x.source,
+          staging_id: x.staging_id,
+        })),
         total: String(Math.round(entry.total_kcal || 0)),
         note: entry.note || hint.trim(),
         exercise_equiv: entry.exercise_equiv ?? {},
@@ -144,6 +158,40 @@ export default function Calories({ accountId }: { accountId: string }) {
     }
   }
 
+  /** 手动加食物：入共建 staging 库；分量说明以括号备注附在名称后（匹配归一时会忽略，与成分表口径一致） */
+  async function handleAddFood() {
+    const name = fName.trim()
+    const kcal = Number(fKcal)
+    if (!name) {
+      setFoodMsg("食物名称没填")
+      return
+    }
+    if (!Number.isFinite(kcal) || kcal <= 0 || kcal > 1000) {
+      setFoodMsg("每 100g 热量没填对（0-1000 kcal）")
+      return
+    }
+    setFoodBusy(true)
+    setFoodMsg("")
+    try {
+      const portion = fPortion.trim()
+      const fullName = portion ? `${name}（${portion}）` : name
+      const res = await api.addFood(accountId, fullName, Math.round(kcal * 10) / 10, undefined, fBrand.trim() || undefined)
+      setFoodMsg(
+        res.food.verified
+          ? `「${res.food.name}」已收录并通过核验`
+          : `「${res.food.name}」已收录，联网核验中，暂标「待核实」`,
+      )
+      setFName("")
+      setFBrand("")
+      setFKcal("")
+      setFPortion("")
+    } catch {
+      setFoodMsg("收录失败，再试一次")
+    } finally {
+      setFoodBusy(false)
+    }
+  }
+
   return (
     <div className="max-w-2xl mx-auto px-5 py-8">
       <h2 className="us-serif text-2xl mb-1">热量</h2>
@@ -205,7 +253,26 @@ export default function Calories({ accountId }: { accountId: string }) {
               <div className="flex flex-col gap-1.5 mb-3">
                 {pending.items.map((x, i) => (
                   <div key={i} className="flex justify-between text-sm">
-                    <span>{x.name}</span>
+                    <span>
+                      {x.brand ? <span className="text-[#264653]/70">{x.brand}·</span> : null}
+                      {x.name}
+                      {x.grams ? <span className="text-stone-400"> {x.grams}g</span> : null}
+                      {x.source === "table" && (
+                        <span className="ml-1 text-[10px] text-[#2A9D8F] border border-[#2A9D8F]/40 rounded px-1 align-middle">
+                          查表
+                        </span>
+                      )}
+                      {x.source === "staging" && (
+                        <span className="ml-1 text-[10px] text-[#F4A261] border border-[#F4A261]/50 rounded px-1 align-middle">
+                          待核实
+                        </span>
+                      )}
+                      {x.source === "web_pending" && (
+                        <span className="ml-1 text-[10px] text-[#E76F51] border border-[#E76F51]/50 rounded px-1 align-middle">
+                          待认可
+                        </span>
+                      )}
+                    </span>
                     <span className="text-stone-500">{Math.round(x.kcal)} kcal</span>
                   </div>
                 ))}
@@ -261,6 +328,45 @@ export default function Calories({ accountId }: { accountId: string }) {
           </button>
         </div>
         {submitError && <p className="text-xs text-red-500 mt-2">{submitError}</p>}
+      </section>
+
+      {/* 手动加食物（营养共建：入 staging 库，后台联网核验，满 3 人认可进正式成分表） */}
+      <section className="mb-10">
+        <p className="us-serif text-base mb-3">手动加食物</p>
+        <div className="flex gap-3 items-center flex-wrap">
+          <input
+            className="us-input flex-1 min-w-32"
+            placeholder="食物名称，如「火鸡面」"
+            value={fName}
+            onChange={(e) => setFName(e.target.value)}
+          />
+          <input
+            className="us-input w-28"
+            placeholder="品牌（可空），如「三养」"
+            value={fBrand}
+            onChange={(e) => setFBrand(e.target.value)}
+          />
+          <input
+            className="us-input w-36"
+            type="number"
+            placeholder="每 100g 热量（kcal）"
+            value={fKcal}
+            onChange={(e) => setFKcal(e.target.value)}
+          />
+          <input
+            className="us-input flex-1 min-w-32"
+            placeholder="分量说明（可空），如「一小碗约 150g」"
+            value={fPortion}
+            onChange={(e) => setFPortion(e.target.value)}
+          />
+          <button className="us-btn" disabled={foodBusy || !fName.trim() || !fKcal} onClick={handleAddFood}>
+            {foodBusy ? "收录中…" : "收录"}
+          </button>
+        </div>
+        <p className="text-xs text-stone-400 mt-2">
+          收录进共建库后会联网核验，核验通过与大家的认可积累到 3 次后会进入正式成分表
+        </p>
+        {foodMsg && <p className="text-xs text-stone-500 mt-1">{foodMsg}</p>}
       </section>
 
       {/* 今日记录 */}

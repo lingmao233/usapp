@@ -5,19 +5,17 @@
 import json
 import os
 import sqlite3
-import subprocess
 import sys
 import tempfile
 import time
 
-# 独立测试数据库 + 强制 mock 模式（覆盖 .env 里可能存在的 key），必须在 import app 之前设置
+# 独立测试数据库 + 清空厂商 key（覆盖 .env 里可能存在的值；AI 走 conftest 装的 tests/fakes 桩）
 os.environ["DB_PATH"] = os.path.join(tempfile.mkdtemp(prefix="us_test_"), "test.db")
 os.environ["LLM_API_KEY"] = ""
 os.environ["EMBEDDING_API_KEY"] = ""
 os.environ["VISION_API_KEY"] = ""
 os.environ["VISION_MODEL"] = ""
-SERVER_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, SERVER_DIR)
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -138,7 +136,7 @@ def test_author_filter(client: TestClient) -> None:
 def test_related_filters_private(client: TestClient) -> None:
     """相关推荐排除他人隐私碎片；隐私碎片本身对他人 404。"""
     cid, u1, u2 = _make_circle(client)
-    # 三条同文碎片：mock embedding 下余弦 = 1.0，必然 ≥ 0.7 阈值
+    # 三条同文碎片：确定性桩 embedding 下余弦 = 1.0，必然 ≥ 0.7 阈值
     subject = _post(client, cid, u1["user_id"], "想去山顶看流星雨")
     priv_same = _post(client, cid, u2["user_id"], "想去山顶看流星雨", visibility="private")
     pub_same = _post(client, cid, u2["user_id"], "想去山顶看流星雨")
@@ -183,7 +181,7 @@ def test_private_not_archived(client: TestClient) -> None:
 def test_private_wish_not_in_common(client: TestClient) -> None:
     """隐私愿望：列表仅本人可见，共同愿望匹配只考虑公开愿望。"""
     cid, u1, u2 = _make_circle(client)
-    # 对照组：两条公开同文愿望应当匹配上（mock embedding 余弦 = 1.0）
+    # 对照组：两条公开同文愿望应当匹配上（确定性桩 embedding 余弦 = 1.0）
     w1 = _post(client, cid, u1["user_id"], "想去露营看星星")
     w2 = _post(client, cid, u2["user_id"], "想去露营看星星")
     # 实验组：阿澈的隐私愿望 + 丫丫的公开同文愿望，不应产生匹配
@@ -210,7 +208,7 @@ def test_private_wish_not_in_common(client: TestClient) -> None:
 def test_plan_participants_exclude_private(client: TestClient) -> None:
     """「一起去」方案的参与匹配只考虑公开愿望：隐私愿望作者不出现在他人方案的 participants 里。"""
     cid, u1, u2 = _make_circle(client)
-    # 丫丫公开愿望 + 阿澈同文隐私愿望（mock embedding 余弦 = 1.0，不过滤必然匹配上）
+    # 丫丫公开愿望 + 阿澈同文隐私愿望（确定性桩 embedding 余弦 = 1.0，不过滤必然匹配上）
     w_pub = _post(client, cid, u2["user_id"], "想去山里徒步看云海")
     w_priv = _post(client, cid, u1["user_id"], "想去山里徒步看云海", visibility="private")
     _wait_processed(client, w_pub, u2["user_id"])
@@ -298,7 +296,7 @@ def test_manual_private_wish(client: TestClient) -> None:
 def test_manual_private_wish_not_matched(client: TestClient) -> None:
     """手动私密愿望不进共同愿望匹配，其作者也不出现在他人方案的 participants 里。"""
     cid, u1, u2 = _make_circle(client)
-    # 对照组：两条公开同文手动愿望应当匹配上（mock embedding 余弦 = 1.0）
+    # 对照组：两条公开同文手动愿望应当匹配上（确定性桩 embedding 余弦 = 1.0）
     client.post("/api/wishes", json={"circle_id": cid, "user_id": u1["user_id"], "content": "想去露营看星星"})
     client.post("/api/wishes", json={"circle_id": cid, "user_id": u2["user_id"], "content": "想去露营看星星"})
     # 实验组：阿澈私密手动愿望 + 丫丫公开同文手动愿望，不应产生匹配
@@ -338,57 +336,3 @@ def test_pipeline_wish_visibility_column(client: TestClient) -> None:
     db.close()
     assert rows[priv] == "private"
     assert rows[pub] == "public"
-
-
-def test_wishes_visibility_migration() -> None:
-    """存量迁移（子进程独立库）：老库 wishes 无 visibility 列 → 补列，
-    碎片来源愿望同步来源碎片可见性，手动愿望默认 public；重复执行幂等。"""
-    db_path = os.path.join(tempfile.mkdtemp(prefix="us_test_mig_"), "old.db")
-    conn = sqlite3.connect(db_path)
-    # 第 1 期形态老库：fragments 已有 visibility，wishes 没有
-    conn.execute(
-        """CREATE TABLE fragments (
-            id TEXT PRIMARY KEY, user_id TEXT NOT NULL, circle_id TEXT NOT NULL,
-            content TEXT NOT NULL, type TEXT DEFAULT 'text', tags TEXT DEFAULT '[]',
-            mood TEXT DEFAULT '', embedding BLOB, created_at TEXT NOT NULL,
-            is_knowledge INTEGER DEFAULT 0, is_wish INTEGER DEFAULT 0,
-            wish_category TEXT DEFAULT '', ai_summary TEXT DEFAULT '', processed INTEGER DEFAULT 0,
-            visibility TEXT NOT NULL DEFAULT 'public')"""
-    )
-    conn.execute(
-        """CREATE TABLE wishes (
-            id TEXT PRIMARY KEY, user_id TEXT NOT NULL, circle_id TEXT NOT NULL,
-            content TEXT NOT NULL, category TEXT DEFAULT 'do', fragment_id TEXT DEFAULT '',
-            status TEXT DEFAULT 'active', matched_users TEXT DEFAULT '[]', embedding BLOB,
-            plan TEXT, created_at TEXT NOT NULL)"""
-    )
-    conn.execute("INSERT INTO fragments (id, user_id, circle_id, content, created_at, visibility)"
-                 " VALUES ('f1','u1','c1','隐私碎片','2026-08-01T10:00:00','private')")
-    conn.execute("INSERT INTO fragments (id, user_id, circle_id, content, created_at, visibility)"
-                 " VALUES ('f2','u1','c1','公开碎片','2026-08-01T11:00:00','public')")
-    conn.execute("INSERT INTO wishes (id, user_id, circle_id, content, fragment_id, created_at)"
-                 " VALUES ('w1','u1','c1','来自隐私碎片的愿望','f1','2026-08-01T10:00:00')")
-    conn.execute("INSERT INTO wishes (id, user_id, circle_id, content, fragment_id, created_at)"
-                 " VALUES ('w2','u1','c1','来自公开碎片的愿望','f2','2026-08-01T11:00:00')")
-    conn.execute("INSERT INTO wishes (id, user_id, circle_id, content, fragment_id, created_at)"
-                 " VALUES ('w3','u1','c1','手动添加的愿望','','2026-08-01T12:00:00')")
-    conn.commit()
-    conn.close()
-
-    # 子进程跑真实 init_db：本进程 get_conn 已绑定会话库，无法就地换库
-    code = (
-        f"import sys, json; sys.path.insert(0, {SERVER_DIR!r});"
-        "from app.db.database import init_db, get_conn;"
-        "init_db(); init_db();"
-        "rows = get_conn().execute('SELECT id, visibility FROM wishes').fetchall();"
-        "print(json.dumps({r['id']: r['visibility'] for r in rows}))"
-    )
-    out = subprocess.run(
-        [sys.executable, "-c", code],
-        env={**os.environ, "DB_PATH": db_path},
-        capture_output=True,
-        text=True,
-    )
-    assert out.returncode == 0, out.stderr
-    vis = json.loads(out.stdout.strip())
-    assert vis == {"w1": "private", "w2": "public", "w3": "public"}

@@ -2,7 +2,7 @@
 
 面向 3-14 人熟人小圈子的 AI 异步社交 App（web + PWA）：各自随手丢碎片（文字/链接/图片），AI 自动分类打标签、发现成员间的隐性连接（「可能相关」卡片）、把链接归档进知识库并生成摘要、识别愿望并匹配共同愿望，每周生成「交集报告」。一个身份（account）可以加入多个圈子，首页的「我的圈子」列表随时切换进入。
 
-**没有 API key、没有 Redis 也能一键跑起来**——AI 会自动进入 mock 模式（本地确定性桩），完整体验所有功能。
+**不需要 Redis 也能一键跑起来**（可选缓存自动降级进程内字典）；AI 能力需要配置 LLM/EMBEDDING/VISION key（三组参数同厂商只需填一个 LLM_API_KEY）。
 
 ## 功能一览
 
@@ -16,17 +16,40 @@
 - **多圈子多身份**：一个身份加入多个圈子；6 位恢复码（可自定义）换设备找回身份
 - **PWA**：可安装到主屏，手写 manifest + service worker，支持 Web Push
 - **个人功能（「我的」Tab）**：目标系统（减肥/存款/学习 + 自定义）+ AI 每日计划（昨日完成自适应）+ 拍照记账/热量估算（视觉模型识别 + 确认入账）+ 三类型联动规则；数据账号级私有，可选公开到指定圈子接受熟人鞭策
+- **情绪树洞**：私密陪伴型对话 agent（Landing 第三入口）——记住你说过的和发过的，按你的偏好与设立的人设回应
+
+## Agent 架构
+
+两个 agent 场景共用 **LangGraph** 图编排（白名单依赖：langgraph / langmem / langgraph-checkpoint-sqlite / langchain-openai）：
+
+**情绪树洞（有状态对话 agent）**
+
+```
+用户消息 → 意图路由（倾诉/提问/查数据）
+        → 检索（查询改写 → 碎片向量+关键词双路 RRF 融合 × 时效衰减）
+        → 工具节点（tool calling：查账本/今日计划/热量/碎片/记忆画像）
+        → 人设扮演生成（酒馆式人设卡 + 偏好画像 + 引用落地带来源）
+        → 安全护栏（仅强烈自伤意愿替换干预话术，普通抱怨不误伤）
+        → 记忆写回（L1 原子记忆实时抽取，langmem）
+```
+
+- 分层记忆（借鉴 TencentDB-Agent-Memory 的 L0-L3 模型）：L0 对话原文永不删 → L1 原子事实实时抽取 → L2 场景聚类 → L3 复用夜间蒸馏画像
+- 上下文压缩：人设卡/画像/最近 10 轮原文永不压缩；更早历史走填槽式滚动增量摘要（带源消息 id 可回溯）
+- 会话状态：LangGraph SqliteSaver checkpoint 落同一个 SQLite
+- 评估闭环：`server/scripts/treehole_eval.py`（事实保留率/检索命中率/护栏正确率/人设一致率 + LLM 裁判 pairwise），改 prompt/检索后跑回归
+
+**方案评审团（多 agent 协作，backlog）**：愿望方案生成改为 fan-out/fan-in——起草人格出草案 → PLAN_KINDS 多个人格并行评审 → 汇总修订终稿。
+
+**选型取舍**：记忆持久化用自研 SQLite BaseStore 适配（langmem 官方只有内存/Postgres store）；不上向量数据库——几千条碎片暴力余弦毫秒级，向量 DB 解决的是百万级 ANN 规模问题而非质量问题，检索层已抽象，十万级再切 pgvector 不改业务。
 
 ## 技术栈
 
 - 前端：React 19 + TypeScript + Vite + Tailwind + shadcn/ui（web + PWA，端口 7100）
 - 后端：FastAPI（端口 8000），同进程托管前端构建产物；前端经 Vite proxy `/api` 访问
 - 存储：SQLite（WAL，`server/data/app.db`，手写 PRAGMA 迁移）+ Redis（可选，连不上自动降级进程内缓存）
-- AI：DeepSeek（文本 LLM：分类/摘要/周报/画像/方案）+ 豆包 doubao-embedding-vision（图文同空间多模态向量）+ 豆包视觉模型（可选，图片 caption，env 开关）；无 key 自动切确定性 mock 桩，真实调用失败回退并记 degraded
+- AI：LLM/EMBEDDING/VISION 三组通用参数（OpenAI 兼容，厂商可换）；未配置的功能自动优雅关闭（如视觉），不静默返回假数据
 - 向量检索：embedding 以 float32 blob 存 SQLite，numpy 暴力余弦（小圈子规模足够）
 - 推送：pywebpush（VAPID 密钥首次使用自动生成，订阅存 SQLite）
-
-（`weapp/` 为已冻结的微信小程序端历史代码，不在当前产品内。）
 
 ## 快速开始
 
@@ -44,7 +67,7 @@ python3 -m venv .venv
 cp .env.example server/.env
 ```
 
-不填任何 key 直接跳过本步也能跑（mock 模式）。要接真实模型时填写（三组参数同厂商时只需填 `LLM_API_KEY`，其余 KEY/BASE_URL 自动回退）：
+不接真实模型可留空跳过（AI 功能将不可用）；要接真实模型时填写（三组参数同厂商时只需填 `LLM_API_KEY`，其余 KEY/BASE_URL 自动回退）：
 
 | 变量 | 说明 |
 |------|------|
@@ -79,7 +102,7 @@ npm run dev
 ## 验证
 
 ```bash
-# 单元/集成测试（140 个用例，全部强制 mock 模式保证确定性）
+# 单元/集成测试（200+ 用例，确定性桩在 tests/fakes.py，conftest 自动接线，不触网）
 cd server && .venv/bin/python -m pytest tests/ -q
 
 # 手写全链路冒烟（62 断言：建圈→加入→发碎片→分类/归档/愿望→相关推荐→语义搜索→共同愿望→方案→周报→目标/计划/记账/热量/鞭策）
@@ -97,10 +120,10 @@ us-app/
 ├── server/               # FastAPI 后端
 │   ├── app/api/          # 路由
 │   ├── app/services/     # 业务逻辑 + 异步管线 + 任务层（重试/degraded 落库）
-│   ├── app/ai/           # deepseek / doubao / mock 桩（统一接口）+ 人格库
-│   ├── app/db/           # sqlite schema（PRAGMA 迁移）、redis 缓存（可降级）
+│   ├── app/ai/           # llm / embedding / vision provider（OpenAI 兼容 HTTP）+ prompts + langmem 集成
+│   ├── app/db/           # sqlite schema、redis 缓存（可降级）
 │   ├── scripts/          # smoke_test.py 等脚本
-│   └── tests/            # pytest 72 用例
+│   └── tests/            # pytest 200+ 用例（fakes.py 确定性桩）
 ├── src/                  # React 前端（web + PWA）
 │   ├── core/             # 平台无关核心：types / api 工厂 / storage 抽象
 │   ├── pages/            # 碎片墙 / 知识库 / 愿望清单 / 关系图 / 入圈

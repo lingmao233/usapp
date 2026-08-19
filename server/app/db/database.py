@@ -1,4 +1,5 @@
 """SQLite 连接与 schema。embedding 以 float32 blob 存储，检索时 numpy 暴力余弦。"""
+import json
 import random
 import sqlite3
 import threading
@@ -286,6 +287,96 @@ CREATE TABLE IF NOT EXISTS self_sharing (
     created_at TEXT NOT NULL,
     PRIMARY KEY (account_id, circle_id, category)
 );
+
+-- 食物营养成分（《中国食物成分表》vendor 数据，scripts/assets/food_nutrition.json）：
+-- 热量识别「识别与计算拆开」的查表数据源；宏量营养素可空（成分表本身缺失）。
+-- embedding 为 name 的文本向量（灌入时算好），LIKE 不中时向量余弦兜底
+CREATE TABLE IF NOT EXISTS food_nutrition (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    brand TEXT NOT NULL DEFAULT '',         -- 品牌（包装食品精准匹配用；原料/通用行为空串）
+    kcal_per_100g REAL NOT NULL,
+    protein_per_100g REAL,
+    fat_per_100g REAL,
+    cho_per_100g REAL,
+    embedding BLOB,
+    UNIQUE(name, brand)                     -- 「种类+品牌」两级：火鸡面/三养 与 火鸡面/ 是不同行
+);
+
+-- 营养共建预数据库（用户共建信任管线）：存「不确定真假」的营养数据。
+-- source=user 用户手动添加（联网核验后 verified=1；与联网值差 50% 以上保持 verified=0 待核实）
+-- source=web  查表未命中时联网搜到的（落库即 verified=1，item 标 web_pending 待用户认可）
+-- approvals ≥ 3（不同账号认可，去重见下表）→ 晋升正式 food_nutrition 并删除本行
+CREATE TABLE IF NOT EXISTS food_nutrition_staging (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    brand TEXT NOT NULL DEFAULT '',         -- 品牌（与正式表同口径；空串=通用款）
+    kcal_per_100g REAL NOT NULL,
+    protein_per_100g REAL,
+    fat_per_100g REAL,
+    cho_per_100g REAL,
+    source TEXT NOT NULL DEFAULT 'user',    -- user/web
+    verified INTEGER NOT NULL DEFAULT 0,
+    approvals INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    UNIQUE(name, brand)
+);
+
+-- 认可去重：同一账号对同一 staging 行只计一次 approvals
+CREATE TABLE IF NOT EXISTS food_staging_approvals (
+    staging_id INTEGER NOT NULL REFERENCES food_nutrition_staging(id),
+    account_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (staging_id, account_id)
+);
+
+-- ---------- 情绪树洞（Agent 化改造）：新表独立，不动现有表 ----------
+
+-- L0 对话原文：树洞每轮 user/assistant 全文落库，永不删（摘要不替代原文，可回溯）
+CREATE TABLE IF NOT EXISTS treehole_messages (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL REFERENCES accounts(id),
+    role TEXT NOT NULL,                    -- user/assistant
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_treehole_messages_account
+    ON treehole_messages(account_id, created_at);
+
+-- L1 原子记忆：一条一事实（喜好/事实/事件/承诺），每轮对话后实时抽取（hot path）。
+-- source_msg_ids 记录来源 L0 消息 id（JSON 数组，可回溯）；embedding 供向量召回
+CREATE TABLE IF NOT EXISTS memory_atoms (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL REFERENCES accounts(id),
+    kind TEXT NOT NULL,                    -- preference/fact/event/commitment
+    content TEXT NOT NULL,
+    source_msg_ids TEXT NOT NULL DEFAULT '[]',
+    embedding BLOB,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_memory_atoms_account ON memory_atoms(account_id, kind);
+
+-- L2 场景记忆：围绕某主题聚合多条 L1（后台异步聚类产出；pinned=置顶主题）
+CREATE TABLE IF NOT EXISTS memory_scenarios (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL REFERENCES accounts(id),
+    topic TEXT NOT NULL,
+    atom_ids TEXT NOT NULL DEFAULT '[]',
+    pinned INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_memory_scenarios_account ON memory_scenarios(account_id);
+
+-- 树洞人设卡（酒馆式）：账号级一张，设立一次持久扮演；字段宽松可空
+CREATE TABLE IF NOT EXISTS treehole_persona (
+    account_id TEXT PRIMARY KEY REFERENCES accounts(id),
+    name TEXT NOT NULL DEFAULT '',
+    personality TEXT NOT NULL DEFAULT '',   -- 性格
+    speaking_style TEXT NOT NULL DEFAULT '', -- 说话风格
+    relationship TEXT NOT NULL DEFAULT '',  -- 与用户的关系
+    background TEXT NOT NULL DEFAULT '',    -- 背景设定
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -318,7 +409,65 @@ def init_db() -> None:
     _migrate_circles_persona()
     _migrate_wishes_matched_status()
     _migrate_nudges_plan_date()
+    _migrate_food_brand()
+    _seed_food_nutrition()
     get_conn().commit()
+
+
+def _migrate_food_brand() -> None:
+    """存量迁移：food_nutrition / food_nutrition_staging 无 brand 列时重建表
+    （SQLite 不能改唯一约束：UNIQUE(name) → UNIQUE(name, brand)，存量行 brand 补 ''）。"""
+    conn = get_conn()
+    for table in ("food_nutrition", "food_nutrition_staging"):
+        cols = [r["name"] for r in conn.execute(f"PRAGMA table_info({table})")]
+        if not cols or "brand" in cols:
+            continue
+        if table.endswith("staging"):
+            tail_old = ", source, verified, approvals, created_at"
+            tail_new = tail_old
+        else:
+            tail_old = ", embedding"
+            tail_new = tail_old
+        conn.execute(f"ALTER TABLE {table} RENAME TO {table}_old")
+        conn.executescript(SCHEMA)  # 按新结构建表（IF NOT EXISTS，其他表不受影响）
+        conn.execute(
+            f"""INSERT OR IGNORE INTO {table} (id, name, brand, kcal_per_100g,
+                   protein_per_100g, fat_per_100g, cho_per_100g{tail_new})
+                SELECT id, name, '', kcal_per_100g, protein_per_100g, fat_per_100g,
+                       cho_per_100g{tail_old} FROM {table}_old"""
+        )
+        conn.execute(f"DROP TABLE {table}_old")
+
+
+def _seed_food_nutrition() -> None:
+    """食物成分表灌入（幂等）：表为空且 vendor JSON 存在时导入，name 向量同时算好存 BLOB。
+
+    vendor 文件随仓库分发（scripts/import_food_nutrition.py 产出），部署自包含；
+    已有数据的库启动时直接跳过，不重复灌入。
+    """
+    conn = get_conn()
+    if conn.execute("SELECT COUNT(*) AS c FROM food_nutrition").fetchone()["c"]:
+        return
+    assets = Path(__file__).resolve().parents[2] / "scripts" / "assets" / "food_nutrition.json"
+    if not assets.is_file():
+        return
+    from .. import ai  # 延迟导入：ai 依赖 config，避免模块加载顺序成环
+
+    rows = json.loads(assets.read_text(encoding="utf-8"))
+    for r in rows:
+        conn.execute(
+            """INSERT OR IGNORE INTO food_nutrition
+               (name, kcal_per_100g, protein_per_100g, fat_per_100g, cho_per_100g, embedding)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                r["name"],
+                r["kcal_per_100g"],
+                r.get("protein_per_100g"),
+                r.get("fat_per_100g"),
+                r.get("cho_per_100g"),
+                encode_embedding(ai.embed_text(r["name"])),
+            ),
+        )
 
 
 # ---------- 恢复码 ----------
@@ -497,7 +646,7 @@ def _migrate_nudges_plan_date() -> None:
 def reset_db() -> None:
     """仅测试用：清空全部数据。"""
     conn = get_conn()
-    for table in ("self_sharing", "nudge_blocks", "nudges", "calorie_entries", "expenses", "plan_items", "goals", "chat_messages", "chat_threads", "common_wishes_cache", "pair_relationships", "user_profiles", "task_runs", "reports", "wishes", "comments", "likes", "push_subscriptions", "knowledge_items", "fragments", "memberships", "users", "circles", "accounts"):
+    for table in ("treehole_persona", "memory_scenarios", "memory_atoms", "treehole_messages", "food_staging_approvals", "food_nutrition_staging", "self_sharing", "nudge_blocks", "nudges", "calorie_entries", "expenses", "plan_items", "goals", "chat_messages", "chat_threads", "common_wishes_cache", "pair_relationships", "user_profiles", "task_runs", "reports", "wishes", "comments", "likes", "push_subscriptions", "knowledge_items", "fragments", "memberships", "users", "circles", "accounts"):
         conn.execute(f"DELETE FROM {table}")
     conn.commit()
 

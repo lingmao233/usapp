@@ -12,9 +12,21 @@ import httpx
 from ..config import settings
 
 
-def vision_caption(image_bytes: bytes, fmt: str = "jpeg") -> str:
+def _apply_reasoning(payload: dict, level: str) -> None:
+    """把思考强度写进请求体。off → enable_thinking=false（阿里系关思考）；
+    其余档 → reasoning_effort（豆包/OpenAI 系）。两种字段不支持的厂商会忽略，调用方无感。"""
+    if not level:
+        return
+    if level == "off":
+        payload["enable_thinking"] = False
+    else:
+        payload["reasoning_effort"] = level
+
+
+def vision_caption(image_bytes: bytes, fmt: str = "jpeg", reasoning: str = "") -> str:
     """视觉模型生成检索导向的中文图片描述（caption）。调用方负责开关与失败兜底。
 
+    reasoning 为场景思考强度（off/minimal/low/medium/high），空 = 回退全局 VISION_REASONING。
     caption 不直接展示给用户，而是作为图片内容的文字桥进入向量（embedding 输入 =
     正文 + caption）、参与分类与周报上下文，所以要装满可检索信息：图中文字尽量
     转录，主体/场景/关键物体/氛围都写出来。
@@ -39,8 +51,7 @@ def vision_caption(image_bytes: bytes, fmt: str = "jpeg") -> str:
         ],
     }
     # 深度思考类模型可压思考强度省 token；未配置时不传该参，对不支持它的模型零风险
-    if settings.VISION_REASONING:
-        payload["reasoning_effort"] = settings.VISION_REASONING
+    _apply_reasoning(payload, reasoning or settings.VISION_REASONING)
     resp = httpx.post(
         url,
         headers={"Authorization": f"Bearer {settings.VISION_API_KEY}"},
@@ -51,11 +62,11 @@ def vision_caption(image_bytes: bytes, fmt: str = "jpeg") -> str:
     return str(resp.json()["choices"][0]["message"]["content"]).strip()
 
 
-def vision_json(image_path: str, prompt: str) -> dict | list:
+def vision_json(image_path: str, prompt: str, reasoning: str = "") -> dict | list:
     """视觉模型结构化识别：图片 + prompt（要求只输出 JSON），返回解析后的 JSON。
 
     未配置视觉模型抛 RuntimeError；剥掉可能的 markdown ```json fence 后解析，
-    解析失败抛异常（让上层走降级）。
+    解析失败抛异常（让上层走降级）。reasoning 为场景思考强度，空 = 回退全局。
     """
     if not settings.VISION_MODEL:
         raise RuntimeError("未配置 VISION_MODEL")
@@ -77,8 +88,7 @@ def vision_json(image_path: str, prompt: str) -> dict | list:
         ],
     }
     # 深度思考类模型可压思考强度省 token；未配置时不传该参，对不支持它的模型零风险
-    if settings.VISION_REASONING:
-        payload["reasoning_effort"] = settings.VISION_REASONING
+    _apply_reasoning(payload, reasoning or settings.VISION_REASONING)
     resp = httpx.post(
         url,
         headers={"Authorization": f"Bearer {settings.VISION_API_KEY}"},

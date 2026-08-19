@@ -1,7 +1,10 @@
-"""记忆层：画像与关系分量的计算、dirty 打点与每晚蒸馏重算。
+"""记忆层：画像与关系分量的计算、dirty 打点与每晚蒸馏重算（圈子向，L3 底座）。
 
 四分量各自落库（pair_relationships 独立列），总分读取时用 compute_pair_score 现算，
 调权重不需要重算历史数据。隐私铁律：隐私碎片照常参与计算，只限制展示。
+
+树洞（Agent 化）的 L0-L2 分层在同包子模块：layers.py（L0 原文 / L1 原子 / L3 聚合读取）、
+scenarios.py（L2 场景聚类）。
 """
 import json
 import logging
@@ -9,9 +12,9 @@ from collections import Counter
 from datetime import datetime
 from itertools import combinations
 
-from .. import ai
-from ..db.database import cosine, decode_embedding, get_conn
-from . import wishes
+from ... import ai
+from ...db.database import cosine, decode_embedding, get_conn
+from .. import wishes
 
 logger = logging.getLogger("us.memory")
 
@@ -108,7 +111,7 @@ def _topics(frags_a: list, frags_b: list) -> tuple[list[dict], float]:
 
 
 def _pair_wish_counts(conn, circle_id: str) -> dict:
-    """共同愿望分量：两人经确认（LLM / mock 相似度）的共同愿望数，按用户对计数。
+    """共同愿望分量：两人经确认（LLM 确认或相似度兜底）的共同愿望数，按用户对计数。
 
     含隐私来源愿望（算分对称、展示不对称）。返回
     {(user_a, user_b): {"total": 总数, "secret": 双隐数, "public": 双公开数}}；

@@ -1,4 +1,4 @@
-/** 平台无关的数据类型定义：web 与小程序（weapp）共用。 */
+/** 平台无关的数据类型定义（web 端）。 */
 
 export interface Session {
   circle_id: string
@@ -6,7 +6,7 @@ export interface Session {
   nickname: string
   circle_name: string
   invite_code: string
-  /** 账号级字段（账号系统重构后随 session 写入；可选，不破坏 weapp 存量） */
+  /** 账号级字段（账号系统重构后随 session 写入） */
   account_id?: string
   username?: string
   has_password?: boolean
@@ -251,6 +251,15 @@ export interface CalorieItem {
   name: string
   kcal: number
   amount?: string
+  /** 品牌（包装食品识别出才有，如 三养/白象） */
+  brand?: string
+  /** 模型估计的分量（克），识别时才有 */
+  grams?: number
+  /** table=查《中国食物成分表》计算，model=模型估值兜底，
+   *  staging=命中共建预数据库（待核实），web_pending=联网搜到（待认可） */
+  source?: string
+  /** source ∈ staging/web_pending 时指向 food_nutrition_staging 行，确认入账即计一次认可 */
+  staging_id?: number
 }
 
 /** MET 运动等效：{running: {name: "跑步（8公里/小时）", met, minutes}, ...} */
@@ -310,6 +319,21 @@ export interface CalorieDay {
   budget_kcal?: number
 }
 
+/** 营养共建预数据库（staging）行：verified=false 即「待核实」；approvals ≥ 3 晋升正式成分表 */
+export interface StagedFood {
+  id: number
+  name: string
+  kcal_per_100g: number
+  protein_per_100g?: number | null
+  fat_per_100g?: number | null
+  cho_per_100g?: number | null
+  /** user=用户手动添加，web=联网搜到 */
+  source?: string
+  verified?: boolean
+  approvals?: number
+  created_at?: string
+}
+
 /* ---------------- Self 共享与朋友任务（类别 × 圈子开关） ---------------- */
 
 /** 共享类别：goal/plan 带 level 档位（progress/detail）；ledger/calorie 只有开关（level 恒 ''） */
@@ -360,4 +384,40 @@ export interface FriendTasksResp {
   circle_id: string
   date: string
   members: FriendMember[]
+}
+
+/* ---------------- 情绪树洞（账号级私密对话，与圈子正交） ---------------- */
+
+/** 树洞消息（L0 原文，history 接口正序全量返回） */
+export interface TreeholeMessage {
+  id: string
+  role: "user" | "assistant"
+  content: string
+  created_at: string
+}
+
+/** 回复依据：检索命中的碎片/原子记忆摘抄（仅当轮 chat 响应返回，history 没有） */
+export interface TreeholeCitation {
+  kind: string
+  id: string
+  excerpt: string
+}
+
+/** 树洞整包响应：guardrail=true 表示触发干预话术（话术由后端给，前端照常展示） */
+export interface TreeholeChatResp {
+  reply: string
+  citations: TreeholeCitation[]
+  tools_used: string[]
+  intent: string
+  guardrail: boolean
+}
+
+/** 树洞人设卡：未设立时服务端合成默认倾听者并标 default=true（前端据此显示「去设立」引导） */
+export interface TreeholePersona {
+  name: string
+  personality: string
+  speaking_style: string
+  relationship: string
+  background: string
+  default: boolean
 }

@@ -8,7 +8,7 @@ import sys
 import tempfile
 import time
 
-# 独立测试数据库 + 强制 mock 模式（覆盖 .env 里可能存在的 key），必须在 import app 之前设置
+# 独立测试数据库 + 清空厂商 key（挡住 .env 回填；AI 由 conftest 装 tests/fakes 确定性桩），必须在 import app 之前设置
 os.environ["DB_PATH"] = os.path.join(tempfile.mkdtemp(prefix="us_test_mm_"), "test.db")
 os.environ["LLM_API_KEY"] = ""
 os.environ["EMBEDDING_API_KEY"] = ""
@@ -20,7 +20,8 @@ import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app import ai  # noqa: E402
-from app.ai import embedding, mock, vision  # noqa: E402
+from app.ai import embedding, vision  # noqa: E402
+import fakes  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.main import app  # noqa: E402
 from app.services import fragments as frag_svc  # noqa: E402
@@ -109,12 +110,53 @@ def test_vision_caption_payload_shape(monkeypatch) -> None:
     assert content[0]["type"] == "image_url" and content[1]["type"] == "text"
 
 
+def test_vision_reasoning_levels(monkeypatch) -> None:
+    """分场景思考强度：off → enable_thinking=false；其余档 → reasoning_effort；
+    场景变量 > 总开关 > 场景默认（caption=high，food=low，receipt=minimal）。"""
+    captured: dict = {}
+
+    class Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+    monkeypatch.setattr(
+        vision.httpx, "post",
+        lambda url, headers=None, json=None, timeout=None: captured.update(payload=json) or Resp(),
+    )
+    monkeypatch.setattr(settings, "VISION_MODEL", "m")
+    monkeypatch.setattr(settings, "VISION_REASONING", "")  # 压掉真实 .env 里的值
+
+    vision.vision_caption(JPEG_A, "jpeg", reasoning="off")
+    assert captured["payload"]["enable_thinking"] is False
+    assert "reasoning_effort" not in captured["payload"]
+
+    vision.vision_caption(JPEG_A, "jpeg", reasoning="high")
+    assert captured["payload"]["reasoning_effort"] == "high"
+    assert "enable_thinking" not in captured["payload"]
+
+    vision.vision_caption(JPEG_A, "jpeg", reasoning="")
+    assert "reasoning_effort" not in captured["payload"] and "enable_thinking" not in captured["payload"]
+
+    # 场景默认值与覆盖优先级
+    monkeypatch.setattr(settings, "VISION_REASONING", "")
+    assert settings.vision_reasoning("caption") == "high"
+    assert settings.vision_reasoning("receipt") == "minimal"
+    assert settings.vision_reasoning("food") == "low"
+    monkeypatch.setattr(settings, "VISION_REASONING", "low")
+    assert settings.vision_reasoning("caption") == "low"  # 总开关压默认
+    monkeypatch.setattr(settings, "VISION_REASONING_RECEIPT", "off")
+    assert settings.vision_reasoning("receipt") == "off"  # 场景变量压总开关
+
+
 # ---------- 碎片向量：正文 + caption 拼接 ----------
 
 def test_fragment_embedding_text_with_caption(monkeypatch) -> None:
     """带图碎片：embedding 输入 = 正文 + caption 拼接；视觉关闭（无 caption）退回 正文 or "[图片]"。"""
     captured: list[str] = []
-    monkeypatch.setattr(ai, "embed_text", lambda t: captured.append(t) or mock.embed(t))
+    monkeypatch.setattr(ai, "embed_text", lambda t: captured.append(t) or fakes.embed(t))
 
     pipeline.fragment_embedding("海边", "一只猫在海边")
     assert captured[-1] == "海边 一只猫在海边"  # 正文 + caption 拼接
@@ -191,10 +233,10 @@ def test_caption_switch_on(monkeypatch) -> None:
     """开了视觉模型且配了 key：走 vision.vision_caption；调用失败优雅返回空。"""
     monkeypatch.setattr(settings, "VISION_API_KEY", "x")
     monkeypatch.setattr(settings, "VISION_MODEL", "vision-test-model")
-    monkeypatch.setattr(vision, "vision_caption", lambda d, f: "一只猫在海边")
+    monkeypatch.setattr(vision, "vision_caption", lambda d, f, **_: "一只猫在海边")
     assert ai.image_caption(JPEG_A) == "一只猫在海边"
 
-    def _boom(d, f):
+    def _boom(d, f, **_):
         raise RuntimeError("模拟视觉模型宕机")
 
     monkeypatch.setattr(vision, "vision_caption", _boom)
@@ -215,9 +257,9 @@ def test_caption_flows_into_classify_and_report(client: TestClient, monkeypatch)
     assert r.status_code == 200, r.text
     f = _wait_processed(client, r.json()["id"], u1["user_id"])
 
-    # caption 落列；分类输入 = caption → 标签与「一只猫在海边」的 mock 提取一致
+    # caption 落列；分类输入 = caption → 标签与「一只猫在海边」的确定性桩提取一致
     assert f["caption"] == "一只猫在海边"
-    assert set(f["tags"]) == set(mock._extract_tags("一只猫在海边"))
+    assert set(f["tags"]) == set(fakes._extract_tags("一只猫在海边"))
     assert f["is_wish"] is False  # caption 不含愿望关键词，占位词时代行为不回归
 
     # 周报素材：[图片] + caption 进 fragments_repr（LLM 只拿分析结果，不接触图片）

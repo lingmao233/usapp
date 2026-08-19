@@ -8,7 +8,7 @@ import re
 import sys
 import tempfile
 
-# 独立测试数据库 + 强制 mock 模式（覆盖 .env 里可能存在的 key），必须在 import app 之前设置
+# 独立测试数据库 + 清空厂商 key（挡住 .env 回填；AI 由 conftest 装 tests/fakes 确定性桩），必须在 import app 之前设置
 os.environ["DB_PATH"] = os.path.join(tempfile.mkdtemp(prefix="us_test_auth_"), "test.db")
 os.environ["LLM_API_KEY"] = ""
 os.environ["EMBEDDING_API_KEY"] = ""

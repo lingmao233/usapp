@@ -8,7 +8,7 @@ import sys
 import tempfile
 import time
 
-# 独立测试数据库 + 强制 mock 模式（覆盖 .env 里可能存在的 key），必须在 import app 之前设置
+# 独立测试数据库 + 清空厂商 key（挡住 .env 回填；AI 由 conftest 装 tests/fakes 确定性桩），必须在 import app 之前设置
 os.environ["DB_PATH"] = os.path.join(tempfile.mkdtemp(prefix="us_test_graph_"), "test.db")
 os.environ["LLM_API_KEY"] = ""
 os.environ["EMBEDDING_API_KEY"] = ""
@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app.ai import mock  # noqa: E402
+import fakes  # noqa: E402
 from app.main import app  # noqa: E402
 from app.services import memory  # noqa: E402
 
@@ -78,7 +78,7 @@ def _edge(graph: dict, uid1: str, uid2: str) -> dict:
 
 
 def _tags(content: str) -> set:
-    return set(mock._extract_tags(content))
+    return set(fakes._extract_tags(content))
 
 
 # ---------- 空圈引导态 ----------
@@ -164,7 +164,7 @@ def test_graph_score_normalized(client: TestClient) -> None:
     g = _graph(client, cid, u1["user_id"])
     assert len(g["edges"]) == 3  # C(3,2)
     assert all(0.0 <= e["score"] <= 1.0 for e in g["edges"])
-    # mock embedding 同文余弦 1.0、tags 完全一致：语义 0.35 + 主题 0.15 归一化后满分
+    # 确定性桩 embedding 同文余弦 1.0、tags 完全一致：语义 0.35 + 主题 0.15 归一化后满分
     assert _edge(g, u1["user_id"], u2["user_id"])["score"] == pytest.approx(1.0)
     # 建圈人没有任何碎片：全信号为 0 → 0 分
     assert _edge(g, creator, u1["user_id"])["score"] == 0.0

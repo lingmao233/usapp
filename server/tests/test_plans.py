@@ -8,7 +8,7 @@ import sqlite3
 import sys
 import tempfile
 
-# 独立测试数据库 + 强制 mock 模式（覆盖 .env 里可能存在的 key），必须在 import app 之前设置
+# 独立测试数据库 + 清空厂商 key（挡住 .env 回填；AI 由 conftest 装 tests/fakes 确定性桩），必须在 import app 之前设置
 os.environ["DB_PATH"] = os.path.join(tempfile.mkdtemp(prefix="us_test_plan_"), "test.db")
 os.environ["LLM_API_KEY"] = ""
 os.environ["EMBEDDING_API_KEY"] = ""
@@ -103,7 +103,7 @@ def test_generate_plan_keeps_wish_active(client: TestClient) -> None:
     _add_wish(client, cid, u2["user_id"], "想去海边看日出")
 
     result = wishes_svc.generate_plan(w1)
-    assert result["plan"]["steps"]  # mock 模板方案
+    assert result["plan"]["steps"]  # 确定性桩模板方案
 
     db = _db()
     row = db.execute("SELECT status, plan FROM wishes WHERE id = ?", (w1,)).fetchone()
@@ -202,7 +202,7 @@ def test_nightly_pregenerates_plans(client: TestClient) -> None:
 # ---------- 方案追问（轻量对话） ----------
 
 def test_plan_chat_flow(client: TestClient) -> None:
-    """追问：方案未生成 400；非成员 403；正常一问一答落库可回读（mock 确定性）。"""
+    """追问：方案未生成 400；非成员 403；正常一问一答落库可回读（fakes 确定性）。"""
     cid, u1, u2 = _make_circle(client)
     w1 = _add_wish(client, cid, u1["user_id"], "想去音乐节")
     _add_wish(client, cid, u2["user_id"], "想去音乐节")
@@ -218,13 +218,13 @@ def test_plan_chat_flow(client: TestClient) -> None:
     r = client.post(f"/api/chat/plan/{w1}", json={"user_id": other["user_id"], "message": "hi"})
     assert r.status_code == 403
 
-    # 正常追问：用户消息 + mock 助手回复
+    # 正常追问：用户消息 + fakes 桩助手回复
     r = client.post(f"/api/chat/plan/{w1}", json={"user_id": u1["user_id"], "message": "预算能砍吗"})
     assert r.status_code == 200, r.text
     messages = r.json()["messages"]
     assert [m["role"] for m in messages] == ["user", "assistant"]
     assert messages[0]["content"] == "预算能砍吗"
-    assert "mock 助手" in messages[1]["content"] and "音乐节" in messages[1]["content"]
+    assert "fakes 助手" in messages[1]["content"] and "音乐节" in messages[1]["content"]
 
     # 回读：再来一条，历史保留
     client.post(f"/api/chat/plan/{w1}", json={"user_id": u1["user_id"], "message": "周六改周日"})

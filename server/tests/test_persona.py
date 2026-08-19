@@ -10,7 +10,7 @@ import tempfile
 import time
 from datetime import datetime, timedelta
 
-# 独立测试数据库 + 强制 mock 模式（覆盖 .env 里可能存在的 key），必须在 import app 之前设置
+# 独立测试数据库 + 清空厂商 key（挡住 .env 回填；AI 由 conftest 装 tests/fakes 确定性桩），必须在 import app 之前设置
 os.environ["DB_PATH"] = os.path.join(tempfile.mkdtemp(prefix="us_test_persona_"), "test.db")
 os.environ["LLM_API_KEY"] = ""
 os.environ["EMBEDDING_API_KEY"] = ""
@@ -166,8 +166,8 @@ def test_weekly_prompt_contains_persona_and_quotes() -> None:
     assert "（本周还没有可引用的发言）" in p2
 
 
-def test_generate_weekly_report_mock_accepts_persona_and_quotes() -> None:
-    """mock 模式下带 persona/quotes 走通完整签名（模板桩不崩，周期标题正确）。"""
+def test_generate_weekly_report_fake_accepts_persona_and_quotes() -> None:
+    """fakes 桩下带 persona/quotes 走通完整签名（模板桩不崩，周期标题正确）。"""
     content = ai.generate_weekly_report(
         "- [2026-08-10] 阿澈：去爬山",
         "2026-08-03",
@@ -242,8 +242,8 @@ def test_quotes_boundary_and_priority(client: TestClient) -> None:
 
 # ---------- style 蒸馏 ----------
 
-def test_style_distillation_mock_deterministic(client: TestClient) -> None:
-    """画像 JSON 带 style 键（mock 确定性）：emoji/句长由公开摘录推导；无摘录为暂无。"""
+def test_style_distillation_fake_deterministic(client: TestClient) -> None:
+    """画像 JSON 带 style 键（fakes 确定性）：emoji/句长由公开摘录推导；无摘录为暂无。"""
     circle, u1, _ = _make_circle(client, name="风格圈")
     cid = circle["id"]
     fid = _post(client, cid, u1["user_id"], "今天好开心呀 😄 哈哈哈")

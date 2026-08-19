@@ -5,7 +5,7 @@
 - 碎片 = pipeline.fragment_embedding（图文双有取均值+归一化，纯图片用图片向量）
 - 愿望 = add_wish / 碎片管线同口径的纯文本向量（content 为空用占位词）
 - 知识条目 = 标题 + 来源碎片原文 + 正文前 500 字（pipeline 归档公式）
-mock 模式下重 embed 也得到确定性结果（文本向量不变、图片碎片从占位词向量换成图片哈希向量）。
+要求真实 EMBEDDING 配置（未配置会在首行 embed 抛 AINotConfiguredError）。
 """
 import os
 import sys

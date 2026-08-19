@@ -1,4 +1,4 @@
-"""冒烟测试：mock 模式下打 FastAPI 完整链路。
+"""冒烟测试：fakes 确定性桩下打 FastAPI 完整链路（不触网、不烧 token）。
 
 链路：建圈子 → 两用户加入 → 各发碎片（含链接、含愿望）→ 断言分类/归档/愿望
 → 相关碎片（跨用户）→ 语义搜索 → 共同愿望匹配 → 行动方案 → 周报 Markdown
@@ -10,14 +10,22 @@ import os
 import sys
 import time
 
-# 独立测试数据库，必须在 import app 之前设置
+# 独立测试数据库 + 清空厂商 key（挡住 .env 回填），必须在 import app 之前设置
 DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "smoke_test.db")
 os.environ["DB_PATH"] = os.path.abspath(DB_PATH)
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+for _k in ("LLM_API_KEY", "EMBEDDING_API_KEY", "VISION_API_KEY", "VISION_MODEL"):
+    os.environ[_k] = ""
+_SERVER_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, _SERVER_DIR)
+sys.path.insert(0, os.path.join(_SERVER_DIR, "tests"))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+import fakes  # noqa: E402
+from app import ai  # noqa: E402
 from app.main import app  # noqa: E402
+
+fakes.install(ai)  # AI 门面整体换确定性桩（与 pytest conftest 同款接线）
 
 # Windows GBK 控制台打不出 ✅/❌：强制 UTF-8 输出（不改编码直接崩 UnicodeEncodeError）
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
@@ -312,7 +320,7 @@ def run_all(client: TestClient) -> None:
 
     r = client.get("/api/plans/today", params={"user_id": u1["user_id"]})
     check("今日计划首次拉取触发懒生成", r.json()["generating"] is True)
-    # TestClient 内联跑完 BackgroundTasks：重拉即收敛出 mock 条目
+    # TestClient 内联跑完 BackgroundTasks：重拉即收敛出确定性桩条目
     r = client.get("/api/plans/today", params={"user_id": u1["user_id"]})
     plan = r.json()
     ai_items = [i for i in plan["items"] if i["source"] == "ai"]

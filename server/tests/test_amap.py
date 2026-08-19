@@ -6,7 +6,7 @@ import os
 import sys
 import tempfile
 
-# 独立测试数据库 + 强制 mock 模式（覆盖 .env 里可能存在的 key），必须在 import app 之前设置
+# 独立测试数据库 + 清空厂商 key（挡住 .env 回填；AI 由 conftest 装 tests/fakes 确定性桩），必须在 import app 之前设置
 os.environ["DB_PATH"] = os.path.join(tempfile.mkdtemp(prefix="us_test_amap_"), "test.db")
 os.environ["LLM_API_KEY"] = ""
 os.environ["EMBEDDING_API_KEY"] = ""
@@ -18,6 +18,7 @@ from app import ai  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.services import amap  # noqa: E402
 from app.services import wishes as wishes_svc  # noqa: E402
+import fakes  # noqa: E402
 
 
 class _Resp:
@@ -130,8 +131,8 @@ def test_plan_context_no_key_still_analyzes(monkeypatch) -> None:
     assert q["scene"] == "周边游"
 
 
-def test_mock_extract_returns_analysis_keys() -> None:
-    """mock 愿望分析桩确定性产出新字段（activity + need_real_data 恒 True 维持旧行为）。"""
+def test_fake_extract_returns_analysis_keys() -> None:
+    """确定性桩愿望分析产出新字段（activity + need_real_data 恒 True 维持旧行为）。"""
     q = ai.extract_plan_query("想找欧培昇玩")
     assert q["kind"] == "activity"
     assert q["need_real_data"] is True
@@ -165,7 +166,8 @@ def test_build_plan_prompt_kind_strategy() -> None:
 
 def test_extract_plan_query_real_path_parsing(monkeypatch) -> None:
     """真实路径解析：kind/mood 小写化与枚举校验、字符串布尔防御、need 与 keywords 联动。"""
-    monkeypatch.setattr(settings, "LLM_API_KEY", "x")  # llm_mock → False
+    monkeypatch.setattr(ai, "extract_plan_query", fakes.REAL_IMPLS["extract_plan_query"])  # 脱掉桩走真身
+    monkeypatch.setattr(settings, "LLM_API_KEY", "x")  # 过 _require_llm 配置闸
     monkeypatch.setattr(
         ai.llm, "chat_json",
         lambda prompt: {"kind": "Venting", "mood": "NEGATIVE", "need_real_data": "false",

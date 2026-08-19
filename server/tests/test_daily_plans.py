@@ -9,7 +9,7 @@ import tempfile
 import uuid
 from datetime import date, datetime, timedelta
 
-# 独立测试数据库 + 强制 mock 模式（覆盖 .env 里可能存在的 key），必须在 import app 之前设置
+# 独立测试数据库 + 清空厂商 key（挡住 .env 回填；AI 由 conftest 装 tests/fakes 确定性桩），必须在 import app 之前设置
 os.environ["DB_PATH"] = os.path.join(tempfile.mkdtemp(prefix="us_test_daily_plans_"), "test.db")
 os.environ["LLM_API_KEY"] = ""
 os.environ["EMBEDDING_API_KEY"] = ""
@@ -60,7 +60,7 @@ def _create_goal(client: TestClient, account_id: str, **over) -> str:
 # ---------- 懒生成 ----------
 
 def test_today_lazy_generation_converges(client: TestClient) -> None:
-    """首次拉取 generating=trigger（路由改写 True）→ 背景任务收敛出 mock 条目 → 再拉不重复生成。"""
+    """首次拉取 generating=trigger（路由改写 True）→ 背景任务收敛出桩条目 → 再拉不重复生成。"""
     uid = _new_user(client)
     # 无目标：不触发，空清单
     r = client.get("/api/plans/today", params={"account_id": uid})
@@ -72,7 +72,7 @@ def test_today_lazy_generation_converges(client: TestClient) -> None:
     r = client.get("/api/plans/today", params={"account_id": uid})
     assert r.json()["generating"] is True and r.json()["items"] == []
 
-    # 收敛：mock 桩按 study 模板出 2 条（daily_minutes=45 进文案），source='ai'
+    # 收敛：确定性桩按 study 模板出 2 条（daily_minutes=45 进文案），source='ai'
     r = client.get("/api/plans/today", params={"account_id": uid})
     body = r.json()
     assert body["generating"] is False

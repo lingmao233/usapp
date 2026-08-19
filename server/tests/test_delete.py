@@ -10,7 +10,7 @@ import tempfile
 import time
 from pathlib import Path
 
-# 独立测试数据库 + 强制 mock 模式（覆盖 .env 里可能存在的 key），必须在 import app 之前设置
+# 独立测试数据库 + 清空厂商 key（挡住 .env 回填；AI 由 conftest 装 tests/fakes 确定性桩），必须在 import app 之前设置
 os.environ["DB_PATH"] = os.path.join(tempfile.mkdtemp(prefix="us_test_del_"), "test.db")
 os.environ["LLM_API_KEY"] = ""
 os.environ["EMBEDDING_API_KEY"] = ""
@@ -108,7 +108,7 @@ def test_delete_fragment_cascades(client: TestClient) -> None:
     受影响用户对互动分量当场重算归零，且用户对被标 dirty 等 nightly。"""
     cid, u1, u2 = _make_circle(client)
     url = _upload(client)
-    # 含愿望关键词 + 链接（mock 分类：is_wish + is_knowledge），且带图
+    # 含愿望关键词 + 链接（确定性桩分类：is_wish + is_knowledge），且带图
     fid = _post(
         client, cid, u1["user_id"],
         "想去露营看星星，攻略 https://example.com/camp-guide-123 先存着", image_url=url,

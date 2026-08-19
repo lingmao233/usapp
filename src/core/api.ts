@@ -1,8 +1,4 @@
-/** 平台无关的 API 客户端工厂：注入 RequestFn 即得完整 api 对象。
- *
- * web（src/lib/api.ts）与小程序（weapp/src/platform.ts）各自注入平台实现，
- * 方法签名与路径保持一一对应，保证两端行为一致、命中同一后端同一数据库。
- */
+/** 平台无关的 API 客户端工厂：注入 RequestFn 即得完整 api 对象（web 端由 src/lib/api.ts 注入 fetch 实现）。 */
 import type { RequestFn } from "./http"
 import type {
   AccountCirclesResp,
@@ -28,7 +24,11 @@ import type {
   Session,
   SharingCategory,
   SharingItem,
+  StagedFood,
   TodayPlan,
+  TreeholeChatResp,
+  TreeholeMessage,
+  TreeholePersona,
   Wish,
   WishPlan,
 } from "./types"
@@ -121,14 +121,6 @@ export function createApi(req: RequestFn) {
           body: { invite_code, nickname, account_id: account_id ?? undefined },
         },
       ),
-
-    /** @deprecated 个人恢复码登录体系已作废（后端 /api/accounts/claim 已下线）；
-     * 仅因 weapp 冻结版仍引用而保留签名，web 端不要再调。 */
-    claimAccount: (recovery_code: string) =>
-      req<{ account_id: string; nickname: string }>("/api/accounts/claim", {
-        method: "POST",
-        body: { recovery_code },
-      }),
 
     getAccount: (account_id: string) =>
       req<{
@@ -507,6 +499,56 @@ export function createApi(req: RequestFn) {
     // 按日查询：{date, items, consumed_kcal, budget_kcal?}
     listCalories: (account_id: string, date: string) =>
       req<CalorieDay>(`/api/calories?account_id=${account_id}&date=${date}`),
+
+    /* ---------------- 营养共建（staging 预数据库） ---------------- */
+
+    // 手动加食物：入 staging（source=user），后台异步联网核验；verified=false 即「待核实」
+    addFood: (
+      account_id: string,
+      name: string,
+      kcal_per_100g: number,
+      macros?: { protein_per_100g?: number; fat_per_100g?: number; cho_per_100g?: number },
+      brand?: string,
+    ) =>
+      req<{ food: StagedFood; created: boolean; message?: string }>("/api/nutrition/foods", {
+        method: "POST",
+        body: { account_id, name, kcal_per_100g, ...macros, brand: brand || undefined },
+      }),
+
+    /* ---------------- 情绪树洞（账号级私密对话） ---------------- */
+
+    // 发一句：整包返回 {reply, citations, tools_used, intent, guardrail}；guardrail 话术照常展示
+    treeholeChat: (account_id: string, message: string) =>
+      req<TreeholeChatResp>("/api/treehole/chat", {
+        method: "POST",
+        body: { account_id, message },
+      }),
+
+    // 历史原文（服务端包 {items}，正序全量）
+    treeholeHistory: async (account_id: string) =>
+      unwrapList<TreeholeMessage>(
+        await req<TreeholeMessage[] | { items?: TreeholeMessage[] }>(
+          `/api/treehole/history?account_id=${account_id}`,
+        ),
+        "items",
+      ),
+
+    // 清空对话（L0 原文 + 会话状态；L1/L2 记忆与人设卡保留）
+    treeholeClear: (account_id: string) =>
+      req<{ status?: string }>(`/api/treehole/history?account_id=${account_id}`, {
+        method: "DELETE",
+      }),
+
+    // 人设卡：未设立返回 default=true 的默认倾听者
+    getTreeholePersona: (account_id: string) =>
+      req<TreeholePersona>(`/api/treehole/persona?account_id=${account_id}`),
+
+    // 设立/覆盖人设卡（宽松字段全部可空但至少填一个；空名字服务端回退「树洞」）
+    putTreeholePersona: (account_id: string, persona: Omit<TreeholePersona, "default">) =>
+      req<TreeholePersona>("/api/treehole/persona", {
+        method: "PUT",
+        body: { account_id, ...persona },
+      }),
   }
 }
 

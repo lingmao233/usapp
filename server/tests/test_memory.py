@@ -9,7 +9,7 @@ import sys
 import tempfile
 import time
 
-# 独立测试数据库 + 强制 mock 模式（覆盖 .env 里可能存在的 key），必须在 import app 之前设置
+# 独立测试数据库 + 清空厂商 key（挡住 .env 回填；AI 由 conftest 装 tests/fakes 确定性桩），必须在 import app 之前设置
 os.environ["DB_PATH"] = os.path.join(tempfile.mkdtemp(prefix="us_test_mem_"), "test.db")
 os.environ["LLM_API_KEY"] = ""
 os.environ["EMBEDDING_API_KEY"] = ""
@@ -21,7 +21,8 @@ import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app import ai  # noqa: E402
-from app.ai import llm, mock  # noqa: E402
+from app.ai import llm, vision  # noqa: E402
+import fakes  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.db.database import init_db  # noqa: E402
 from app.main import app  # noqa: E402
@@ -93,7 +94,7 @@ def _pair_row(cid: str, uid1: str, uid2: str) -> sqlite3.Row:
 # ---------- 任务层 ----------
 
 def test_task_runner_retry_then_success(monkeypatch) -> None:
-    """失败按次数重试、指数退避；成功后记 success（纯 mock 模式不算 degraded）。"""
+    """失败按次数重试、指数退避；成功后记 success（未触发降级路径不算 degraded）。"""
     sleeps: list[float] = []
     monkeypatch.setattr(tasks.time, "sleep", sleeps.append)
     calls: list[int] = []
@@ -133,26 +134,50 @@ def test_task_runner_failed_records_error(monkeypatch) -> None:
     assert row["status"] == "failed" and "永远失败" in row["error"]
 
 
-def test_task_runner_degraded_on_mock_fallback(monkeypatch) -> None:
-    """配了 key 但真实调用失败回退 mock → degraded（不再静默）。"""
-    monkeypatch.setattr(type(ai.settings), "llm_mock", property(lambda self: False))
+def test_task_runner_failed_on_ai_error(monkeypatch) -> None:
+    """配了 key 但真实 LLM 调用抛错：不再回退桩数据，重试耗尽记 failed + error。"""
+    monkeypatch.setattr(tasks.time, "sleep", lambda s: None)
+    monkeypatch.setattr(settings, "LLM_API_KEY", "x")  # 过 _require_llm 配置闸
+    monkeypatch.setattr(ai, "classify_fragment", fakes.REAL_IMPLS["classify_fragment"])  # 脱掉桩走真身
 
-    def _boom(prompt: str) -> dict:
+    def _boom(prompt: str, **kwargs) -> dict:
         raise RuntimeError("模拟 LLM 宕机")
 
     monkeypatch.setattr(llm, "chat_json", _boom)
 
-    result: dict = {}
-    status = tasks.run_task(
-        "degraded_probe", "t1", lambda: result.update(ai.classify_fragment("想去测试降级"))
-    )
+    status = tasks.run_task("ai_error_probe", "t1", lambda: ai.classify_fragment("想去测试"))
+    assert status == "failed"
+
+    db = _db()
+    row = db.execute("SELECT status, error FROM task_runs WHERE task_name='ai_error_probe'").fetchone()
+    db.close()
+    assert row["status"] == "failed" and "模拟 LLM 宕机" in row["error"]
+
+
+def test_task_runner_degraded_on_graceful_skip(monkeypatch) -> None:
+    """优雅跳过类降级（视觉调用失败返回空，不产桩数据）→ 任务记 degraded，不算 failed。"""
+    monkeypatch.setattr(settings, "VISION_API_KEY", "x")
+    monkeypatch.setattr(settings, "VISION_MODEL", "vl-x")
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("模拟视觉模型宕机")
+
+    monkeypatch.setattr(vision, "vision_caption", _boom)
+
+    status = tasks.run_task("degraded_probe", "t2", lambda: ai.image_caption(b"\x00"))
     assert status == "degraded"
-    assert result["tags"]  # 内容来自 mock 桩，功能本身没挂
 
     db = _db()
     row = db.execute("SELECT status FROM task_runs WHERE task_name='degraded_probe'").fetchone()
     db.close()
     assert row["status"] == "degraded"
+
+
+def test_unconfigured_llm_raises_clear_error() -> None:
+    """未配置 LLM（key 空）时真身直接报清晰错误，不再静默产桩数据。"""
+    real = fakes.REAL_IMPLS["classify_fragment"]
+    with pytest.raises(ai.AINotConfiguredError, match="未配置 LLM"):
+        real("想吃火锅")
 
 
 # ---------- 亲密度纯函数 ----------
@@ -210,7 +235,7 @@ def test_components_and_topic_visibility_markers(client: TestClient) -> None:
     db.close()
     assert run_row["status"] == "success"
 
-    # 分量正确性（同文碎片：mock embedding 余弦 1.0，tags 完全一致 Jaccard 1.0）
+    # 分量正确性（同文碎片：确定性桩 embedding 余弦 1.0，tags 完全一致 Jaccard 1.0）
     row = _pair_row(cid, u1["user_id"], u2["user_id"])
     assert row["semantic"] == pytest.approx(1.0, abs=1e-3)
     assert row["common_topics"] == 1.0
@@ -221,11 +246,11 @@ def test_components_and_topic_visibility_markers(client: TestClient) -> None:
 
     # 共同主题三类来源可见性标记（隐私碎片照常参与计算，标记即证据）
     stored = {t["tag"]: t["source"] for t in json.loads(row["topics"])}
-    for tag in mock._extract_tags("爬山赏枫叶"):
+    for tag in fakes._extract_tags("爬山赏枫叶"):
         assert stored[tag] == "public-public"
-    for tag in mock._extract_tags("夜里写代码"):
+    for tag in fakes._extract_tags("夜里写代码"):
         assert stored[tag] == "private-public"
-    for tag in mock._extract_tags("攒钱买相机"):
+    for tag in fakes._extract_tags("攒钱买相机"):
         assert stored[tag] == "private-private"
 
     # 画像生成且 dirty 清除（建圈人「新朋友」也在圈里，共 3 行）
@@ -265,7 +290,7 @@ def test_common_wishes_component(client: TestClient) -> None:
 
     memory.refresh_dirty(cid)
     row = _pair_row(cid, u1["user_id"], u2["user_id"])
-    assert row["common_wishes"] == 1  # mock embedding 余弦 1.0 ≥ 0.7，聚成同一簇
+    assert row["common_wishes"] == 1  # 确定性桩 embedding 余弦 1.0 ≥ 0.7，聚成同一簇
     assert row["secret_common_wishes"] == 0  # 双方公开，无秘密共同愿望
 
 

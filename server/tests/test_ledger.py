@@ -11,7 +11,7 @@ import tempfile
 import uuid
 from datetime import date, datetime
 
-# 独立测试数据库 + 强制 mock 模式（覆盖 .env 里可能存在的 key），必须在 import app 之前设置
+# 独立测试数据库 + 清空厂商 key（挡住 .env 回填；AI 由 conftest 装 tests/fakes 确定性桩），必须在 import app 之前设置
 os.environ["DB_PATH"] = os.path.join(tempfile.mkdtemp(prefix="us_test_ledger_"), "test.db")
 os.environ["LLM_API_KEY"] = ""
 os.environ["EMBEDDING_API_KEY"] = ""
@@ -123,8 +123,8 @@ def test_add_expense_service_bool_rejected(client: TestClient) -> None:
         ledger_svc.add_expense(uid, True)
     assert exc.value.status_code == 400
 
-def test_recognize_400_in_mock_mode(client: TestClient) -> None:
-    """mock 模式未配视觉模型：识别路由恒 400（手动录入兜底），不产生任何数据。"""
+def test_recognize_400_without_vision(client: TestClient) -> None:
+    """未配视觉模型：识别路由恒 400（手动录入兜底），不产生任何数据。"""
     uid = _new_user(client, "识别400圈")
     url = _image_url()
     r = client.post("/api/ledger/recognize", json={"account_id": uid, "image_url": url})
@@ -325,7 +325,7 @@ def test_savings_monthly_settlement_lazy(client: TestClient) -> None:
     assert st["saved_fen"] == 1800000 and st["remaining_fen"] == 4200000
     assert st["monthly_target_fen"] == -(-4200000 // 6)  # ceil
     assert st["done"] is False
-    assert "（mock 建议）" in st["advice"] and m1 in st["advice"]
+    assert "（fakes 建议）" in st["advice"] and m1 in st["advice"]
     # 存款目标进度按金额口径：18000/60000 = 30%
     assert d["progress"]["percent"] == 30
     assert d["status"] == "active"

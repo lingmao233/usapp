@@ -6,13 +6,14 @@
 import logging
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException
 
 from . import ai
-from .api import accounts, auth, chat, circles, fragments, goals, knowledge, ledger, plans, push, reports, self as self_api, uploads, wishes
+from .api import accounts, auth, chat, circles, fragments, goals, knowledge, ledger, nutrition, plans, push, reports, self as self_api, treehole, uploads, wishes
 from .db.database import init_db
 
 logging.basicConfig(
@@ -45,13 +46,21 @@ app.include_router(goals.blocks_router)
 app.include_router(plans.router)
 app.include_router(ledger.router)
 app.include_router(ledger.calories_router)
+app.include_router(nutrition.router)
+app.include_router(treehole.router)
 
 
 @app.on_event("startup")
 def startup() -> None:
     init_db()
     uploads.upload_dir()  # 启动时确保图片上传目录存在
-    logging.getLogger("us.main").info("AI 模式：%s", ai.mode())
+    logging.getLogger("us.main").info("AI 配置：%s", ai.mode())
+
+
+@app.exception_handler(ai.AINotConfiguredError)
+async def ai_not_configured(_request: Request, exc: ai.AINotConfiguredError) -> JSONResponse:
+    """LLM/EMBEDDING 未配置：同步路由统一 503，detail 写清缺哪组配置。"""
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
 @app.get("/api/health")

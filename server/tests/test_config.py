@@ -1,4 +1,4 @@
-"""配置层测试：三组通用参数（LLM/EMBEDDING/VISION）的回退、mock 判定与视觉开关。
+"""配置层测试：三组通用参数（LLM/EMBEDDING/VISION）的回退、mode() 配置巡检与视觉开关。
 
 运行：cd server && .venv-mac/bin/python -m pytest tests/test_config.py -v
 """
@@ -6,14 +6,14 @@ import importlib
 import os
 import sys
 
-# 强制 mock 模式（覆盖 .env 里可能存在的 key），必须在 import app 之前设置
+# 清空厂商 key（覆盖 .env 里可能存在的值），必须在 import app 之前设置
 os.environ["LLM_API_KEY"] = ""
 os.environ["EMBEDDING_API_KEY"] = ""
 os.environ["VISION_API_KEY"] = ""
 os.environ["VISION_MODEL"] = ""
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from app import config  # noqa: E402
+from app import ai, config  # noqa: E402
 
 
 def _reload() -> None:
@@ -21,11 +21,19 @@ def _reload() -> None:
     importlib.reload(config)
 
 
-def test_mock_mode_when_no_keys() -> None:
-    """全部留空：llm/embed 都走 mock，视觉关闭。"""
-    assert config.settings.llm_mock is True
-    assert config.settings.embed_mock is True
+def test_mode_reports_missing_when_no_keys() -> None:
+    """全部留空：mode() 报 llm/embedding missing、视觉 off（只报配置与否，不代表连通）。"""
+    assert ai.mode() == {"llm": "missing", "embedding": "missing", "vision": "off"}
     assert config.settings.vision_enabled is False
+
+
+def test_mode_reports_configured(monkeypatch) -> None:
+    """三组 key/模型填上后 mode() 报 configured/on（直接在实例上改，不重载模块）。"""
+    monkeypatch.setattr(config.settings, "LLM_API_KEY", "k")
+    monkeypatch.setattr(config.settings, "EMBEDDING_API_KEY", "k")
+    monkeypatch.setattr(config.settings, "VISION_API_KEY", "k")
+    monkeypatch.setattr(config.settings, "VISION_MODEL", "vl-test")
+    assert ai.mode() == {"llm": "configured", "embedding": "configured", "vision": "on"}
 
 
 def test_embedding_and_vision_fall_back_to_llm(monkeypatch) -> None:
@@ -39,7 +47,6 @@ def test_embedding_and_vision_fall_back_to_llm(monkeypatch) -> None:
     _reload()
     try:
         s = config.settings
-        assert s.llm_mock is False and s.embed_mock is False  # embed 跟随 LLM key
         assert s.EMBEDDING_API_KEY == "k" and s.EMBEDDING_BASE_URL == "https://llm.example/v1"
         assert s.VISION_API_KEY == "k" and s.VISION_BASE_URL == "https://llm.example/v1"
         assert s.vision_enabled is False  # VISION_MODEL 空 = 视觉关闭

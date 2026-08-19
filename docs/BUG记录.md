@@ -183,3 +183,13 @@
   - 桌面端平铺的 5 个文字按钮全部移除，汉堡下拉统一只留 设置/个人 两项（通知开启入口迁到 /settings）
 - **验证**：`npm run build` 通过、`cd weapp && npx tsc --noEmit` 通过；375px 静态核算：内容区 351px，固定元素（标题+搜索+汉堡）约 100px，nav 弹性吸收余量，溢出只会触发 nav 内部滚动，结构上与文字不再可能重叠。
 - **预防**：**顶栏/底栏新增入口前先做 375px 宽度核算**；横向排列的一组按钮必须有一个 `min-w-0 + overflow-x-auto` 的弹性吸收区，图标入口优先于文字入口。
+
+## BUG-013 落地页点「情绪树洞」被兜底重定向到 Self（/me）
+
+- **日期**：2026-08-20
+- **环境**：本机 dev + 生产（代码缺陷，两端同在）
+- **现象**：登录后落地页点「情绪树洞」，URL 闪过 /treehole 后落到 /me，显示 Self 界面（目标/计划/记账）而非树洞聊天页。
+- **根因**：`App.tsx` 的 `onEnterTreehole` 在同一事件 commit 里 `setSelfOnly(true)`（首次挂载 `<Routes>`）+ `navigate("/treehole")`；新挂载的 Routes 按**旧 location（/）**匹配，命中兜底 `<Route path="*">` 的 `<Navigate to="/me" replace>`，其 effect 把刚导航的 /treehole 顶成 /me。「Self」入口目标是 /me 恰好与兜底相同，症状一直被掩盖；jsdom 最小复现证实同帧「挂载 Routes + navigate」必现，与 StrictMode、setState/navigate 调用顺序无关，仅 `setTimeout` 分帧可规避。
+- **修复**：`src/App.tsx` 删除 `selfOnly` state，Self/树洞区改由 `useLocation` 派生（`inSelfArea = /treehole 或 /me 前缀`）；Landing 三个入口与「返回入口」只 `navigate()`，Routes 只在 location 变更触发的 commit 里挂载，匹配到的必是新 location。顺带修复：无圈状态下刷新/直开 /me、/treehole 此前会掉回落地页，现在直达。
+- **验证**：`npm run build`（含 `tsc -b`）与 eslint 通过；jsdom 加载真实构建产物回归 9 断言全过（点树洞→/treehole 聊天页、点 Self→/me、直开 /treehole、返回入口回落地页，均无页面错误）。
+- **预防**：「条件挂载 `<Routes>`」与「navigate 进该 Routes 内的路由」禁止放同一事件 commit——要么分帧，要么用 location 派生挂载条件；带 `<Route path="*">` 兜底的壳新增入口时，若目标与兜底地址不同，必须手测点击后的真实落点（目标与兜底相同的入口会掩盖此 bug）。

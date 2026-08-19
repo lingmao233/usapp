@@ -22,17 +22,19 @@ function activeLabel(c: AccountCircle): string {
   return `${Math.floor(diff / 86_400_000)} 天前活跃`
 }
 
-/** 登录后的落地页：圈子 / Self 二选一。
+/** 登录后的落地页：圈子 / Self / 情绪树洞 三选一（竖排同级）。
  * 圈子入口：多圈先出选择页、单圈直进、无圈引导新建/加入。 */
 export default function Landing({
   account,
   onEnterCircle,
   onEnterSelf,
+  onEnterTreehole,
   onLogout,
 }: {
   account: AccountInfo
   onEnterCircle: (s: Session) => void
   onEnterSelf: () => void
+  onEnterTreehole: () => void
   onLogout: () => void
 }) {
   const [circles, setCircles] = useState<AccountCircle[] | null>(null)
@@ -93,7 +95,7 @@ export default function Landing({
         </p>
 
         {view === "choose" && (
-          <div className="grid sm:grid-cols-2 gap-4 mb-12">
+          <div className="flex flex-col gap-4 mb-12">
             <button
               className="us-rise us-panel rounded-2xl p-6 text-left transition-all duration-200 hover:translate-y-[-1px]"
               onClick={handleCircleEntrance}
@@ -116,6 +118,16 @@ export default function Landing({
               <p className="us-serif text-xl mb-1.5">Self</p>
               <p className="text-sm text-stone-500 leading-relaxed">
                 你的目标、每日计划、记账和热量，跨圈独一份
+              </p>
+            </button>
+            <button
+              className="us-rise us-panel rounded-2xl p-6 text-left transition-all duration-200 hover:translate-y-[-1px]"
+              style={{ animationDelay: "160ms" }}
+              onClick={onEnterTreehole}
+            >
+              <p className="us-serif text-xl mb-1.5">情绪树洞</p>
+              <p className="text-sm text-stone-500 leading-relaxed">
+                这里只有你和 TA。说什么都行，TA 记得你发过的碎片
               </p>
             </button>
           </div>

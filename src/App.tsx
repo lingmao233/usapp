@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
 import { ArrowLeft, Menu, Search } from "lucide-react"
-import { Navigate, NavLink, Route, Routes, useNavigate } from "react-router"
+import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router"
 import {
   clearAccount,
   clearAccountId,
@@ -34,6 +34,7 @@ import GoalNew from "@/pages/GoalNew"
 import GoalDetail from "@/pages/GoalDetail"
 import Ledger from "@/pages/Ledger"
 import Calories from "@/pages/Calories"
+import TreeHole from "@/pages/TreeHole"
 
 const TABS: { to: string; label: string }[] = [
   { to: "/wall", label: "碎片" },
@@ -59,7 +60,8 @@ function initSession(): Session | null {
   return s
 }
 
-/** Self 系列页路由（圈内 /me 与无圈 selfOnly 模式共用一份） */
+/** Self 系列页路由（圈内 /me 与无圈 Self 壳共用一份）；
+ * 树洞同样只要 accountId，挂在这里两个壳都能进 */
 function selfRoutes(accountId: string) {
   return (
     <>
@@ -68,6 +70,7 @@ function selfRoutes(accountId: string) {
       <Route path="/me/goals/:id" element={<GoalDetail accountId={accountId} />} />
       <Route path="/me/ledger" element={<Ledger accountId={accountId} />} />
       <Route path="/me/calories" element={<Calories accountId={accountId} />} />
+      <Route path="/treehole" element={<TreeHole accountId={accountId} />} />
     </>
   )
 }
@@ -75,9 +78,12 @@ function selfRoutes(accountId: string) {
 export default function App() {
   const [account, setAccount] = useState<AccountInfo | null>(() => loadAccount())
   const [session, setSession] = useState<Session | null>(initSession)
-  // 无圈（或不想去圈子）时只看 Self：账号级数据，挂在 account_id 上
-  const [selfOnly, setSelfOnly] = useState(false)
   const navigate = useNavigate()
+  const location = useLocation()
+  // Self/树洞区由 URL 派生，不用 state + navigate 同帧驱动：
+  // 同一 commit 里「改 state 挂载 Routes + navigate」会让新挂载的 Routes 按旧 location
+  // 匹配，兜底 * 的 <Navigate> 把刚导航的目标页顶掉（见 docs/BUG记录.md BUG-013）
+  const inSelfArea = location.pathname === "/treehole" || location.pathname.startsWith("/me")
 
   // 已授权设备静默换绑到当前圈内身份（切换账号/圈子后保持推送可达）
   useEffect(() => {
@@ -86,7 +92,6 @@ export default function App() {
 
   function handleAuthed(a: AccountInfo) {
     setAccount(a)
-    setSelfOnly(false)
   }
 
   function handleLogout() {
@@ -95,13 +100,11 @@ export default function App() {
     clearAccount()
     setSession(null)
     setAccount(null)
-    setSelfOnly(false)
   }
 
   function enterCircle(s: Session) {
     saveSession(s)
     setSession(s)
-    setSelfOnly(false)
     navigate("/wall")
   }
 
@@ -110,16 +113,14 @@ export default function App() {
     return <Onboarding onDone={handleAuthed} />
   }
 
-  // 已登录未选圈：圈子 / Self 二选一
-  if (!session && !selfOnly) {
+  // 已登录未选圈：圈子 / Self / 情绪树洞 三选一
+  if (!session && !inSelfArea) {
     return (
       <Landing
         account={account}
         onEnterCircle={enterCircle}
-        onEnterSelf={() => {
-          setSelfOnly(true)
-          navigate("/me")
-        }}
+        onEnterSelf={() => navigate("/me")}
+        onEnterTreehole={() => navigate("/treehole")}
         onLogout={handleLogout}
       />
     )
@@ -138,10 +139,7 @@ export default function App() {
             </h1>
             <button
               className="us-btn-ghost text-xs border border-[#264653]/20"
-              onClick={() => {
-                setSelfOnly(false)
-                navigate("/")
-              }}
+              onClick={() => navigate("/")}
             >
               ← 返回入口
             </button>

@@ -18,7 +18,7 @@ from .. import ai
 from ..ai.prompts import EXPENSE_CATEGORIES
 from ..config import settings
 from ..db.database import get_conn
-from . import rules, selfshare
+from . import nutrition, rules, selfshare
 
 MAX_AMOUNT_FEN = 10**12  # 金额 sanity 上限（分，约百亿）
 MAX_KCAL = 20000.0  # 单条热量 sanity 上限
@@ -307,6 +307,10 @@ def _calorie_dict(row) -> dict:
 def recognize_calorie(account_id: str, image_url: str, hint: str = "") -> dict:
     """食物照片识别 → pending 行（菜品明细 + MET 运动等效）；未配视觉模型抛 400。
 
+    识别与计算拆开：模型只认菜名 + 估分量（grams），热量优先查《中国食物成分表》
+    按 kcal_per_100g × grams / 100 计算（item 标 source="table"）；正式表不中再查
+    共建预数据库（source="staging"，待核实）；仍不中且联网开关开时联网搜
+    （source="web_pending" 待认可，同时写入 staging）；全不中回退模型估值（source="model"）。
     hint 为拍照时补的一句描述（"红烧肉一碗约 300g"），显著提升准确度。
     """
     conn = get_conn()
@@ -319,12 +323,40 @@ def recognize_calorie(account_id: str, image_url: str, hint: str = "") -> dict:
         if not isinstance(raw, dict):
             continue
         name = str(raw.get("name") or "").strip()[:50]
-        try:
-            kcal = float(raw.get("kcal"))
-        except (TypeError, ValueError):
+        if not name:
             continue
-        if name and kcal > 0:
-            items.append({"name": name, "kcal": round(kcal)})
+        brand = str(raw.get("brand") or "").strip()[:30]
+        try:
+            grams = float(raw.get("grams"))
+        except (TypeError, ValueError):
+            grams = 0.0
+        try:
+            model_kcal = float(raw.get("kcal"))
+        except (TypeError, ValueError):
+            model_kcal = 0.0
+        hit = nutrition.match(name, brand) if grams > 0 else None
+        kcal = round(hit["kcal_per_100g"] * grams / 100) if hit else 0
+        source = hit["source"] if hit else ""  # table / staging
+        staging_id = hit.get("staging_id") if hit else None
+        if kcal <= 0 and grams > 0:
+            # 查表（含 staging）未命中 → 联网搜（品牌参与查询，搜到按品牌款入 staging）
+            web = ai.web_search_food(name, brand)
+            if web is not None:
+                staging_id = nutrition.upsert_staging_web(name, web, brand)
+                kcal = round(float(web["kcal_per_100g"]) * grams / 100)
+                source = "web_pending"
+        if kcal <= 0 and model_kcal > 0:  # 全不中回退模型估值
+            kcal, source, staging_id = round(model_kcal), "model", None
+        if kcal <= 0:
+            continue
+        item = {"name": name, "kcal": kcal, "source": source}
+        if brand:
+            item["brand"] = brand
+        if staging_id is not None:
+            item["staging_id"] = staging_id
+        if grams > 0:
+            item["grams"] = round(grams)
+        items.append(item)
     total = round(sum(i["kcal"] for i in items), 1)
     if not items or total <= 0:
         raise HTTPException(status_code=400, detail="没识别出有效食物，请手动录入")
@@ -416,7 +448,11 @@ def add_calorie(account_id: str, total_kcal: float | None, note: str = "") -> di
 def confirm_calorie(
     entry_id: str, account_id: str, total_kcal: float | None = None, note: str | None = None
 ) -> dict:
-    """待确认 → 入账（数字可改，改了重算运动等效）；确认后触发超预算联动。重复确认幂等。"""
+    """待确认 → 入账（数字可改，改了重算运动等效）；确认后触发超预算联动。重复确认幂等。
+
+    共建认可：条目里 source ∈ staging/web_pending 的菜品（带 staging_id）在首次确认时
+    计一次认可（同账号同食物去重），满 3 个不同账号认可晋升正式成分表。
+    """
     conn = get_conn()
     row = conn.execute("SELECT * FROM calorie_entries WHERE id = ?", (entry_id,)).fetchone()
     if row is None:
@@ -443,6 +479,9 @@ def confirm_calorie(
         values.append(entry_id)
         conn.execute(f"UPDATE calorie_entries SET {', '.join(fields)} WHERE id = ?", values)
         conn.commit()
+        for item in json.loads(row["items"] or "[]"):
+            if isinstance(item, dict) and item.get("source") in ("staging", "web_pending"):
+                nutrition.approve_staging(item.get("staging_id"), account_id)
     adjustment = _calorie_linkage(conn, account_id)
     return {"id": entry_id, "status": "confirmed", "adjustment": adjustment}
 

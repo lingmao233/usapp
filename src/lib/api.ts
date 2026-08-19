@@ -107,6 +107,10 @@ export type {
   SharingCategory,
   SharingItem,
   TodayPlan,
+  TreeholeChatResp,
+  TreeholeCitation,
+  TreeholeMessage,
+  TreeholePersona,
   Wish,
   WishPlan,
 } from "@/core/types"

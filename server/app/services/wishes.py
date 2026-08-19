@@ -205,7 +205,7 @@ def _pool_fingerprint(conn, circle_id: str) -> str:
 
 
 def compute_common_wishes(circle_id: str, include_private: bool = False) -> list[dict]:
-    """embedding 粗筛（跨用户、≥0.7）+ LLM 按 PRD 6.3 确认；mock 只用相似度。
+    """embedding 粗筛（跨用户、≥0.7）+ LLM 按 PRD 6.3 确认；未配置/失败只用相似度（记 degraded）。
 
     返回结果列表；记忆层按 wish_ids 归属统计用户对共同愿望数。
     默认只匹配公开愿望（隐私愿望不触发对他人可见的匹配提示）；
@@ -266,7 +266,7 @@ def compute_common_wishes(circle_id: str, include_private: bool = False) -> list
             }
         )
 
-    # 2) LLM 确认（mock 模式跳过，直接用相似度结果）
+    # 2) LLM 确认（未配置/失败时 confirm_common_wishes 返回空，直接用相似度结果）
     results = []
     if candidates:
         wishes_repr = "\n".join(
