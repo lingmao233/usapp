@@ -10,7 +10,8 @@ router = APIRouter(prefix="/api/treehole", tags=["treehole"])
 
 class ChatIn(BaseModel):
     account_id: str
-    message: str
+    message: str = ""          # 纯图消息可空（服务端兜底"（发来一张图片）"）
+    image_url: str | None = None  # 先走 /api/uploads 上传，这里只带 URL
 
 
 @router.post("/chat")
@@ -19,7 +20,7 @@ def chat(body: ChatIn, background_tasks: BackgroundTasks):
 
     L2 场景聚类在响应后后台异步刷新（hot path 只做 L0 落库 + L1 抽取）。
     """
-    result = svc.send_message(body.account_id, body.message)
+    result = svc.send_message(body.account_id, body.message, image_url=body.image_url)
     background_tasks.add_task(scenarios.refresh_scenarios, body.account_id)
     return result
 
@@ -41,6 +42,7 @@ class PersonaIn(BaseModel):
     speaking_style: str = ""
     relationship: str = ""
     background: str = ""
+    custom_prompt: str = ""  # 整段人设粘贴：非空时生成优先于模板字段
 
 
 @router.get("/persona")

@@ -33,6 +33,8 @@ SUMMARY_BATCH = 10       # 更早历史每攒 10 条增量并入滚动摘要
 class TreeholeState(TypedDict, total=False):
     account_id: str
     message: str
+    image: str              # 当前消息的图片 data URL（空=纯文本轮）
+    image_url: str          # 图片的上传 URL（L0 落库 / 前端展示用）
     intent: str
     rewritten_query: str
     hits: list[dict]
@@ -100,6 +102,7 @@ def node_generate(state: TreeholeState) -> dict:
         "tool_results": state.get("tool_results") or [],
         "history": layers.list_messages(account_id, limit=VERBATIM_MESSAGES),
         "message": state["message"],
+        "image": state.get("image") or "",
         "intent": state.get("intent", "vent"),
         "citations": citations,
     }
@@ -119,7 +122,8 @@ def node_writeback(state: TreeholeState) -> dict:
     护栏命中的轮次不做 L1 抽取：危机倾诉是求助信号，不作为「记忆条目」沉淀。
     """
     account_id = state["account_id"]
-    user_id = layers.append_message(account_id, "user", state["message"])
+    user_id = layers.append_message(
+        account_id, "user", state["message"], image_url=state.get("image_url") or "")
     reply_id = layers.append_message(account_id, "assistant", state["reply"])
     if not state.get("guardrail"):
         atoms = ai.extract_memory_atoms(state["message"], state["reply"])

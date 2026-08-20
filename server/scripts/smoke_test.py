@@ -13,7 +13,9 @@ import time
 # 独立测试数据库 + 清空厂商 key（挡住 .env 回填），必须在 import app 之前设置
 DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "smoke_test.db")
 os.environ["DB_PATH"] = os.path.abspath(DB_PATH)
-for _k in ("LLM_API_KEY", "EMBEDDING_API_KEY", "VISION_API_KEY", "VISION_MODEL"):
+for _k in ("LLM_API_KEY", "EMBEDDING_API_KEY", "VISION_API_KEY", "VISION_MODEL",
+           "TREEHOLE_API_KEY", "TREEHOLE_BASE_URL", "TREEHOLE_MODEL", "TREEHOLE_WEB_SEARCH",
+           "LLM_TEMPERATURE"):
     os.environ[_k] = ""
 _SERVER_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, _SERVER_DIR)

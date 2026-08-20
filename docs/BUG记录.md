@@ -218,3 +218,30 @@
 - **顺带修正（smoke 存量漂移）**：`scripts/smoke_test.py` 第 11/12/13 节还停在账号系统重构前的契约——`/api/accounts/claim` 已下线（改走 `/api/auth/reset`）、个人功能接口已从 `user_id` 改 `account_id`、目标共享从 per-goal 字段改 `/api/self/sharing` 类别开关。本次一并改写：找回链路改用带账号名的注册账号走 auth/reset（含重置失效、存量 8 位码大小写折叠），个人功能段全量换账号级 API。
 - **验证**：新增 `test_seed_food_nutrition_skips_when_embedding_unconfigured`（装回真实门面断言跳过不崩 + 恢复桩后自动补灌）；`embed_batch` 分块/乱序对齐/空输入直测通过；pytest 203/203；smoke 62 断言全过。
 - **预防**：**启动路径（lifespan/init_db）禁止无容错的外部调用**——任何网络/AI 调用必须可跳过、可下次重试；批量数据初始化一律用批量 API；改 API 契约时必须同步 grep 更新 `scripts/smoke_test.py`（它不在 pytest 收集范围里，重构容易漏）。
+
+## BUG-016 注册/登录卡死在 loading + 树洞真实链路 500 + 灌库 400（三连）
+
+- **日期**：2026-08-20
+- **环境**：本机 dev（①为本机环境问题；②③④为代码问题，两端同在）
+- **现象**：前端注册/登录按钮一直停在「注册中/登录中」，所有 API 请求无响应；排查中另发现树洞 chat 真实调用 500、启动灌库 embedding 400。
+- **根因（四条独立）**：
+  1. **僵尸进程占端口**：凌晨启动的 `uvicorn --reload`（PID 47797）在白天大批量代码改动中热重载卡死——占着 :8000、接受 TCP 连接但永不返回字节，SIGTERM 杀不动（SIGKILL 才清掉）。vite 把所有 /api 请求代理给它 → 前端请求永不 settle → 按钮停在 loading。直 curl `/api/health` 超时 0 字节确认。
+  2. **temperature 限制**：树洞 chat 500 的真实原因是 provider 400 `invalid temperature: only 1 is allowed for this model`——当前 .env 用的 k3 类推理模型只接受 temperature=1，而 `llm.py` 写死 0.7（用 spy 包住 httpx.post 打出真实响应体定位）。
+  3. **embedding 分块超限**：`embed_batch` 分块 64 条，火山 doubao-embedding 单次 input 上限 10（`max 10, got 64`），BUG-015 的批量改动在火山厂商下必 400（好在灌库已有容错，只跳过不崩）。
+  4. **测试环境隔离缺口**：conftest/smoke 的清 key 清单没含新增的 `TREEHOLE_*`/`LLM_TEMPERATURE`，本机真实 .env 的 TREEHOLE_BASE_URL/MODEL 漏进测试，断言被环境污染。
+- **修复**：① SIGKILL 清僵尸重启；② `llm.py` 温度改 `_temperature()`——`LLM_TEMPERATURE` 可配、默认 0.7，.env.example 注明推理模型设 1；③ `embed_batch` 分块 64→10（注释注明火山上限）；④ conftest.py / smoke_test.py / test_treehole.py 清 key 清单补齐 5 个新配置项。
+- **验证**：pytest 207/207；smoke 62 断言；真实 provider 全链路 curl（注册/登录/树洞 chat/历史持久化）通过；jsdom 真实产物验证树洞历史文本+图片渲染通过。
+- **预防**：dev 无响应先 `lsof -iTCP:8000` 看进程再起疑代码——`--reload` 在大批量改动后卡死要第一反应重启；接入新模型/新厂商时用 spy 打印真实错误响应体（Provider 的 400 文案比猜准）；**新增配置项必须同步进 conftest 与 smoke 的清 key 清单**（漏一个，本机 .env 就会污染测试）。
+
+## BUG-017 树洞联网没生效：Kimi 编程套餐入口被判成"非 Kimi"+ 回声协议 type 踩网关
+
+- **日期**：2026-08-20
+- **环境**：本机 dev（真实 key 联调发现，代码问题，两端同在）
+- **现象**：树洞发图问"猜是哪个明星"，AI 只描述图片说猜不出；追问为什么不联网搜，AI 答"我这儿没联网"。
+- **根因（两条叠加）**：
+  1. 联网开关的厂商判断写窄了：`treehole_web_search_enabled` 用 `"moonshot" in base_url` 识别 Kimi，而 Kimi 编程套餐入口是 `api.kimi.com/coding`——被误判成非 Kimi，`$web_search` 工具压根没下发，模型只能如实说没联网。
+  2. 即使下发也会死在协议第二轮：Kimi 返回的 `tool_calls[].type` 是 `builtin_function`，按官方文档"原样回显"进 messages 后，kimi.com/coding 网关报 400 `Invalid request: tokenization failed`；实测把回显的 type 归一为 OpenAI 线格式 `function` 后全链路走通（platform 与 coding 两个入口都接受）。
+- **修复**：`config.py` 厂商判断扩为 `moonshot`/`kimi.com` 双域名；`llm.chat_messages` 回显 assistant tool_calls 时 type 统一改 `"function"`；`test_treehole.py` 协议测试补归一化断言。
+- **验证**：真实端点全链路 curl——问天气、问科技新闻均返回联网结果（finish_reason 走完整 tool_calls→stop 回路）；pytest 207/207。
+- **预防**：第三方协议实现别只信文档"原样回传"，必须用真实端点跑完整回路才算数；厂商/入口判断用域名清单，别用单个关键字。
+- **备注（非 bug）**："看照片猜明星"是模型的人脸识别安全策略（各厂商一致），联网搜索解决不了；用户告诉树洞这人是谁后，外貌特征会经 caption → L1 记忆管线沉淀，之后能"认出"。

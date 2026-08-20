@@ -341,6 +341,7 @@ CREATE TABLE IF NOT EXISTS treehole_messages (
     account_id TEXT NOT NULL REFERENCES accounts(id),
     role TEXT NOT NULL,                    -- user/assistant
     content TEXT NOT NULL,
+    image_url TEXT NOT NULL DEFAULT '',    -- 树洞发图：/api/uploads/... 原图 URL（空=纯文本）
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_treehole_messages_account
@@ -378,6 +379,7 @@ CREATE TABLE IF NOT EXISTS treehole_persona (
     speaking_style TEXT NOT NULL DEFAULT '', -- 说话风格
     relationship TEXT NOT NULL DEFAULT '',  -- 与用户的关系
     background TEXT NOT NULL DEFAULT '',    -- 背景设定
+    custom_prompt TEXT NOT NULL DEFAULT '', -- 整段人设粘贴：非空时优先于上面模板字段
     updated_at TEXT NOT NULL
 );
 """
@@ -413,6 +415,7 @@ def init_db() -> None:
     _migrate_wishes_matched_status()
     _migrate_nudges_plan_date()
     _migrate_food_brand()
+    _migrate_treehole_image_and_custom_persona()
     _seed_food_nutrition()
     get_conn().commit()
 
@@ -607,6 +610,18 @@ def _migrate_fragments_caption() -> None:
     cols = [r[1] for r in conn.execute("PRAGMA table_info(fragments)").fetchall()]
     if cols and "caption" not in cols:
         conn.execute("ALTER TABLE fragments ADD COLUMN caption TEXT DEFAULT ''")
+
+
+def _migrate_treehole_image_and_custom_persona() -> None:
+    """存量迁移：treehole_messages 补 image_url 列（树洞发图）；
+    treehole_persona 补 custom_prompt 列（整段人设粘贴，非空时优先于模板字段）。"""
+    conn = get_conn()
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(treehole_messages)").fetchall()]
+    if cols and "image_url" not in cols:
+        conn.execute("ALTER TABLE treehole_messages ADD COLUMN image_url TEXT NOT NULL DEFAULT ''")
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(treehole_persona)").fetchall()]
+    if cols and "custom_prompt" not in cols:
+        conn.execute("ALTER TABLE treehole_persona ADD COLUMN custom_prompt TEXT NOT NULL DEFAULT ''")
 
 
 def _migrate_circles_persona() -> None:

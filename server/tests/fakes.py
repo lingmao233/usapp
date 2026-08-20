@@ -366,6 +366,12 @@ def treehole_reply(payload: dict) -> str:
     return "\n".join(parts)
 
 
+def treehole_image_caption(image_bytes: bytes, fmt: str = "jpeg", user_text: str = "") -> str:
+    """图片描述桩：确定性文案（含随图文字回声），测试可断言 caption 进了 L0 原文/L1 抽取。"""
+    base = f"用户发来的{fmt}图片"
+    return f"{base}（随图说：{user_text[:20]}）" if user_text else base
+
+
 def treehole_compress(old_summary: dict, messages: list[dict]) -> dict:
     """滚动摘要桩：填槽式增量合并——facts 取用户消息首句（带源消息 id），其余槽确定性拼装。"""
     merged = {
@@ -473,6 +479,7 @@ PATCHES: dict[str, object] = {
     "treehole_rewrite": treehole_rewrite,
     "treehole_tool_plan": _treehole_tool_plan,
     "treehole_reply": treehole_reply,
+    "treehole_image_caption": treehole_image_caption,
     "treehole_compress": treehole_compress,
     "extract_memory_atoms": extract_memory_atoms,
 }

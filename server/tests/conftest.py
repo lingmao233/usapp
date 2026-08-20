@@ -14,7 +14,9 @@ import tempfile
 # 必须在 import app 之前：独立测试库 + 清空厂商 key（load_dotenv override=False，
 # 已存在的环境变量优先，空串能挡住 .env 回填）
 os.environ["DB_PATH"] = os.path.join(tempfile.mkdtemp(prefix="us_test_"), "test.db")
-for _k in ("LLM_API_KEY", "EMBEDDING_API_KEY", "VISION_API_KEY", "VISION_MODEL"):
+for _k in ("LLM_API_KEY", "EMBEDDING_API_KEY", "VISION_API_KEY", "VISION_MODEL",
+           "TREEHOLE_API_KEY", "TREEHOLE_BASE_URL", "TREEHOLE_MODEL", "TREEHOLE_WEB_SEARCH",
+           "LLM_TEMPERATURE"):
     os.environ[_k] = ""
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 

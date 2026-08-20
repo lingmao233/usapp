@@ -18,7 +18,7 @@ DEFAULT_PERSONA = {
     "background": "",
 }
 
-_FIELDS = ("name", "personality", "speaking_style", "relationship", "background")
+_FIELDS = ("name", "personality", "speaking_style", "relationship", "background", "custom_prompt")
 
 
 def get_persona(account_id: str) -> dict:
@@ -29,28 +29,31 @@ def get_persona(account_id: str) -> dict:
         "SELECT * FROM treehole_persona WHERE account_id = ?", (account_id,)
     ).fetchone()
     if row is None:
-        return {**DEFAULT_PERSONA, "default": True}
+        return {**DEFAULT_PERSONA, "custom_prompt": "", "default": True}
     return {f: row[f] for f in _FIELDS} | {"default": False}
 
 
 def put_persona(account_id: str, fields: dict) -> dict:
-    """设立/覆盖人设卡（宽松字段：全部可空，超长截断，空名字回退「树洞」）。"""
+    """设立/覆盖人设卡（宽松字段：全部可空，超长截断，空名字回退「树洞」；
+    custom_prompt 整段人设截断 4000，非空时生成优先于模板字段）。"""
     conn = get_conn()
     selfshare.require_account(conn, account_id)
     values = {f: str(fields.get(f) or "").strip()[:200] for f in _FIELDS}
+    values["custom_prompt"] = str(fields.get("custom_prompt") or "").strip()[:4000]
     if not any(values.values()):
         raise HTTPException(status_code=400, detail="人设卡至少填一个字段")
     values["name"] = values["name"] or "树洞"
     conn.execute(
         """INSERT INTO treehole_persona (account_id, name, personality, speaking_style,
-                                          relationship, background, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)
+                                          relationship, background, custom_prompt, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(account_id) DO UPDATE SET
              name=excluded.name, personality=excluded.personality,
              speaking_style=excluded.speaking_style, relationship=excluded.relationship,
-             background=excluded.background, updated_at=excluded.updated_at""",
+             background=excluded.background, custom_prompt=excluded.custom_prompt,
+             updated_at=excluded.updated_at""",
         (account_id, values["name"], values["personality"], values["speaking_style"],
-         values["relationship"], values["background"],
+         values["relationship"], values["background"], values["custom_prompt"],
          datetime.now().isoformat(timespec="seconds")),
     )
     conn.commit()

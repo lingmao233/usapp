@@ -1,7 +1,7 @@
 """langmem 集成（仅真实模式）：L1 原子记忆抽取。
 
-模型适配走 settings 的 OpenAI 兼容配置（LLM_BASE_URL/LLM_API_KEY/LLM_MODEL），
-经 langchain-openai 的 ChatOpenAI 传给 langmem。本文件只在配好 LLM key 的真实路径
+模型适配走 settings.treehole_llm()（TREEHOLE_* 非空走 Kimi，空回退 LLM_*），
+经 langchain-openai 的 ChatOpenAI 传给 langmem。本文件只在配好 key 的真实路径
 被调用——测试里 ai 门面被 tests/fakes.py 确定性桩整体替换，绝不触达本模块。
 """
 import logging
@@ -61,10 +61,11 @@ def _get_manager():
     """懒建全局 manager（真实模式进程内复用；model 配置变化需重启进程）。"""
     global _manager
     if _manager is None:
+        api_key, base_url, model = settings.treehole_llm()  # L1 抽取随树洞专属配置（Kimi）
         llm = ChatOpenAI(
-            model=settings.LLM_MODEL,
-            api_key=settings.LLM_API_KEY,
-            base_url=settings.LLM_BASE_URL,
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
             temperature=0,
         )
         _manager = create_memory_manager(

@@ -6,13 +6,14 @@
  * - tools_used 是工具名数组，映射成中文标签提示「刚刚查了：…」。
  */
 import { useEffect, useRef, useState } from "react"
-import { Send } from "lucide-react"
+import { ImagePlus, Send, X } from "lucide-react"
 import {
   api,
   type TreeholeCitation,
   type TreeholeMessage,
   type TreeholePersona,
 } from "@/lib/api"
+import { displayUrl, prepareImage, type PreparedImage } from "@/lib/image"
 import Markdown from "@/components/Markdown"
 import {
   Sheet,
@@ -25,6 +26,12 @@ import {
 type LocalMsg = TreeholeMessage & {
   citations?: TreeholeCitation[]
   tools?: string[]
+}
+
+/** 图片消息的气泡文本：剥掉服务端追加的 [图片：…] caption 标记（内部记忆用，不展示） */
+function visibleContent(m: TreeholeMessage): string {
+  if (!m.image_url) return m.content
+  return m.content.replace(/\n?\[图片：[\s\S]*$/, "").trim()
 }
 
 /** 工具名 → 中文标签（与后端 treehole/tools.py 的 TOOLS 注册表对应；未知名兜底原样展示） */
@@ -60,7 +67,8 @@ const PERSONA_FIELDS: {
   },
 ]
 
-/** 人设卡编辑（底部 sheet）：未设立（default）时显示「给 TA 立个人设」引导 */
+/** 人设卡编辑（底部 sheet）：未设立（default）时显示「给 TA 立个人设」引导。
+ * 两种模式：模板填写（结构化五字段）/ 整段粘贴（custom_prompt，非空时生成完全优先） */
 function PersonaSheet({
   accountId,
   persona,
@@ -72,12 +80,16 @@ function PersonaSheet({
   onClose: () => void
   onSaved: (p: TreeholePersona) => void
 }) {
+  const [mode, setMode] = useState<"template" | "custom">(
+    persona?.custom_prompt ? "custom" : "template",
+  )
   const [form, setForm] = useState({
     name: persona?.name ?? "",
     personality: persona?.personality ?? "",
     speaking_style: persona?.speaking_style ?? "",
     relationship: persona?.relationship ?? "",
     background: persona?.background ?? "",
+    custom_prompt: persona?.custom_prompt ?? "",
   })
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState("")
@@ -87,7 +99,9 @@ function PersonaSheet({
     setSaving(true)
     setError("")
     try {
-      onSaved(await api.putTreeholePersona(accountId, form))
+      // 模板模式保存时清空 custom_prompt：避免旧的整段人设继续压过刚填的模板
+      const body = mode === "custom" ? form : { ...form, custom_prompt: "" }
+      onSaved(await api.putTreeholePersona(accountId, body))
     } catch (e) {
       setError(e instanceof Error ? e.message : "保存失败，再试一次")
     } finally {
@@ -104,13 +118,60 @@ function PersonaSheet({
               {persona?.default ? "给 TA 立个人设" : "人设卡"}
             </SheetTitle>
           </SheetHeader>
+          {/* 模式切换：模板填写 / 整段粘贴 */}
+          <div className="flex gap-2 mb-4">
+            {([
+              ["template", "模板填写"],
+              ["custom", "整段粘贴"],
+            ] as const).map(([key, label]) => (
+              <button
+                key={key}
+                className={`rounded-full px-3.5 py-1.5 text-sm transition-colors duration-200 ${
+                  mode === key
+                    ? "bg-[#161616] text-white"
+                    : "text-[#264653] hover:bg-[#264653]/8"
+                }`}
+                onClick={() => setMode(key)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
           <div className="flex-1 overflow-y-auto min-h-0 flex flex-col gap-4 pr-1">
             {persona?.default && (
               <p className="text-xs text-stone-400 leading-relaxed">
                 现在 TA 是默认的倾听者。立了人设，TA 会按这个名字、性格和口吻一直陪你聊。
               </p>
             )}
-            {PERSONA_FIELDS.map((f) => (
+            {mode === "custom" ? (
+              <>
+                <label className="block">
+                  <span className="text-xs text-stone-500">名称</span>
+                  <input
+                    className="us-input mt-1"
+                    placeholder="TA 的名字，比如「树洞」「阿青」"
+                    value={form.name}
+                    onChange={(e) => setForm((v) => ({ ...v, name: e.target.value }))}
+                  />
+                </label>
+                <label className="block">
+                  <span className="text-xs text-stone-500">整段人设</span>
+                  <textarea
+                    className="us-input resize-none mt-1"
+                    rows={10}
+                    placeholder={"把别处写好的人设整段粘进来，比如：\n你是「阿青」，28 岁的女心理咨询师，说话温和但直接……"}
+                    value={form.custom_prompt}
+                    onChange={(e) =>
+                      setForm((v) => ({ ...v, custom_prompt: e.target.value }))
+                    }
+                  />
+                </label>
+                <p className="text-xs text-stone-400 leading-relaxed">
+                  整段人设会原样交给 AI，优先级高于模板字段；想回到模板填写，切到「模板填写」保存即可。
+                </p>
+              </>
+            ) : (
+              PERSONA_FIELDS.map((f) => (
               <label key={f.key} className="block">
                 <span className="text-xs text-stone-500">{f.label}</span>
                 {f.multiline ? (
@@ -130,7 +191,8 @@ function PersonaSheet({
                   />
                 )}
               </label>
-            ))}
+              ))
+            )}
           </div>
           {error && <p className="text-xs text-red-500 mt-3">{error}</p>}
           <div className="flex justify-end gap-2 mt-4">
@@ -151,10 +213,13 @@ export default function TreeHole({ accountId }: { accountId: string }) {
   const [messages, setMessages] = useState<LocalMsg[]>([])
   const [persona, setPersona] = useState<TreeholePersona | null>(null)
   const [draft, setDraft] = useState("")
+  const [image, setImage] = useState<PreparedImage | null>(null)
+  const [imagePreview, setImagePreview] = useState("")
   const [sending, setSending] = useState(false)
   const [sendError, setSendError] = useState("")
   const [personaOpen, setPersonaOpen] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
+  const fileRef = useRef<HTMLInputElement>(null)
 
   // 历史原文 + 人设卡并行拉取（互不影响，各自失败各自静默）
   useEffect(() => {
@@ -173,12 +238,39 @@ export default function TreeHole({ accountId }: { accountId: string }) {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" })
   }, [messages.length, sending])
 
+  async function onPickImage(f: File | null) {
+    if (fileRef.current) fileRef.current.value = ""
+    if (!f) return
+    try {
+      const prepared = await prepareImage(f)
+      setImage(prepared)
+      setImagePreview(URL.createObjectURL(prepared.display))
+      setSendError("")
+    } catch (e) {
+      setSendError(e instanceof Error ? e.message : "图片处理失败，换一张试试")
+    }
+  }
+
   async function send() {
     const text = draft.trim()
-    if (!text || sending) return
+    const img = image
+    if ((!text && !img) || sending) return
     setSending(true)
     setSendError("")
     setDraft("")
+    // 有图先上传（原图 + 1600px 展示图双份，与碎片同款管线）；失败不消费这条消息
+    let imageUrl = ""
+    if (img) {
+      try {
+        imageUrl = (await api.uploadImage(img.original, img.display)).url
+      } catch {
+        setSendError("图片没传上去，再试一次")
+        setSending(false)
+        return
+      }
+      setImage(null)
+      setImagePreview("")
+    }
     // 先乐观上屏自己的话；回复到达后追加（citations/tools 挂在这条本地消息上）
     setMessages((ms) => [
       ...ms,
@@ -186,11 +278,12 @@ export default function TreeHole({ accountId }: { accountId: string }) {
         id: `tmp-u-${Date.now()}`,
         role: "user",
         content: text,
+        image_url: imageUrl,
         created_at: new Date().toISOString(),
       },
     ])
     try {
-      const r = await api.treeholeChat(accountId, text)
+      const r = await api.treeholeChat(accountId, text, imageUrl || undefined)
       setMessages((ms) => [
         ...ms,
         {
@@ -272,7 +365,19 @@ export default function TreeHole({ accountId }: { accountId: string }) {
                     : "bg-white/80 text-stone-700"
                 }`}
               >
-                {m.role === "user" ? m.content : <Markdown text={m.content} />}
+                {m.image_url && (
+                  <img
+                    src={displayUrl(m.image_url)}
+                    alt="发送的图片"
+                    className="rounded-xl max-w-full max-h-64 object-cover mb-1"
+                    onError={(e) => {
+                      // 旧图没有 1600px 展示副本时回退原图
+                      const t = e.currentTarget
+                      if (m.image_url && !t.src.endsWith(m.image_url)) t.src = m.image_url
+                    }}
+                  />
+                )}
+                {m.role === "user" ? visibleContent(m) : <Markdown text={m.content} />}
               </div>
               {m.tools && m.tools.length > 0 && (
                 <p className="text-xs text-stone-400 mt-1">
@@ -311,17 +416,52 @@ export default function TreeHole({ accountId }: { accountId: string }) {
       {/* 输入区：吸底（内容少时停在视口底，内容多时随滚动吸附） */}
       <div className="sticky bottom-0 bg-[#F5F0E1] pt-2 pb-4">
         {sendError && <p className="text-xs text-red-500 mb-1">{sendError}</p>}
+        {imagePreview && (
+          <div className="relative inline-block mb-2">
+            <img
+              src={imagePreview}
+              alt="待发送的图片"
+              className="h-16 w-16 rounded-xl object-cover border border-[#264653]/15"
+            />
+            <button
+              className="absolute -top-1.5 -right-1.5 rounded-full bg-[#161616] text-white p-0.5"
+              onClick={() => {
+                setImage(null)
+                setImagePreview("")
+              }}
+              aria-label="移除图片"
+            >
+              <X className="w-3 h-3" />
+            </button>
+          </div>
+        )}
         <div className="flex items-center gap-2">
           <input
+            ref={fileRef}
+            type="file"
+            accept="image/jpeg,image/png,image/webp,image/gif"
+            className="hidden"
+            onChange={(e) => onPickImage(e.target.files?.[0] ?? null)}
+          />
+          <button
+            className="us-btn-ghost shrink-0 !px-2.5"
+            onClick={() => fileRef.current?.click()}
+            disabled={sending}
+            title="发图片"
+            aria-label="发图片"
+          >
+            <ImagePlus className="w-4 h-4" />
+          </button>
+          <input
             className="us-input flex-1"
-            placeholder={`和${personaName}说点什么…`}
+            placeholder={image ? "给图片配句话（可空）…" : `和${personaName}说点什么…`}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && send()}
           />
           <button
             className="us-btn shrink-0"
-            disabled={sending || !draft.trim()}
+            disabled={sending || (!draft.trim() && !image)}
             onClick={send}
             aria-label="发送"
           >

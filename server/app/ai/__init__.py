@@ -7,6 +7,7 @@
   （视觉跳过、共同愿望仅相似度、记忆写回跳过——均不产假数据）
 - 测试不经过本模块的真实分支：conftest.py 把门面函数整体换成 tests/fakes.py 确定性桩
 """
+import base64
 import json
 import logging
 import threading
@@ -53,6 +54,14 @@ def _require_embedding() -> None:
     if not settings.EMBEDDING_API_KEY:
         raise AINotConfiguredError(
             "未配置 EMBEDDING（EMBEDDING_API_KEY 与回退的 LLM_API_KEY 均为空），向量能力不可用"
+        )
+
+
+def _require_treehole() -> None:
+    """树洞专属配置（treehole_llm()：TREEHOLE_* 非空走 Kimi，空回退 LLM_*）。"""
+    if not settings.treehole_llm()[0]:
+        raise AINotConfiguredError(
+            "未配置树洞模型（TREEHOLE_API_KEY 与回退的 LLM_API_KEY 均为空），树洞不可用"
         )
 
 
@@ -488,6 +497,7 @@ def generate_savings_advice(settlement: dict) -> str:
 
 from .prompts import (  # noqa: E402
     TREEHOLE_COMPRESS_PROMPT,
+    TREEHOLE_IMAGE_PROMPT,
     TREEHOLE_REPLY_PROMPT,
     TREEHOLE_REWRITE_PROMPT,
     TREEHOLE_ROUTE_PROMPT,
@@ -499,26 +509,26 @@ TREEHOLE_INTENTS = ("vent", "question", "data")
 
 def treehole_route(message: str) -> str:
     """① 意图路由：vent/question/data；非法输出回退 vent（倾诉是最安全的口径）。"""
-    _require_llm()
-    intent = llm.chat(TREEHOLE_ROUTE_PROMPT.format(message=message), timeout=30.0).strip().lower()
+    _require_treehole()
+    intent = llm.chat(TREEHOLE_ROUTE_PROMPT.format(message=message),
+                      timeout=30.0, cfg=settings.treehole_llm()).strip().lower()
     return intent if intent in TREEHOLE_INTENTS else "vent"
 
 
 def treehole_rewrite(message: str) -> str:
     """② 查询改写：情绪化输入 → 检索友好 query。"""
-    _require_llm()
-    return llm.chat(TREEHOLE_REWRITE_PROMPT.format(message=message), timeout=30.0).strip()[:50]
+    _require_treehole()
+    return llm.chat(TREEHOLE_REWRITE_PROMPT.format(message=message),
+                    timeout=30.0, cfg=settings.treehole_llm()).strip()[:50]
 
 
 def treehole_tool_plan(message: str, intent: str, tools_desc: str, results: list[dict]) -> dict:
     """③ 工具决策（tool calling 循环的一轮）：返回 {"calls": [{"name", "args"}]}。"""
-    import json as _json
-
-    _require_llm()
+    _require_treehole()
     result = llm.chat_json(TREEHOLE_TOOLS_PROMPT.format(
         tools=tools_desc, message=message, intent=intent,
-        results=_json.dumps(results, ensure_ascii=False) or "（无）",
-    ), timeout=30.0)
+        results=json.dumps(results, ensure_ascii=False) or "（无）",
+    ), timeout=30.0, cfg=settings.treehole_llm())
     calls = [
         {"name": str(c.get("name", "")), "args": dict(c.get("args") or {})}
         for c in result.get("calls") or []
@@ -528,41 +538,82 @@ def treehole_tool_plan(message: str, intent: str, tools_desc: str, results: list
 
 
 def treehole_reply(payload: dict) -> str:
-    """④ 人设扮演生成。payload 由图组装：persona/profile/atoms/hits/summary/
-    tool_results/history/message/intent；单 prompt 成稿。"""
-    import json as _json
-
-    _require_llm()
+    """④ 人设扮演生成（消息制）：system 装人设/画像/记忆/检索/工具结果，history 与当前消息
+    走 messages；当前消息可带图片 part（payload["image"] = data URL）；
+    树洞联网开启时挂 Kimi $web_search（回声协议在 llm.chat_messages）。"""
+    _require_treehole()
     intent_labels = {"vent": "倾诉（先共情接住）", "question": "提问（给具体建议）",
                      "data": "查数据（如实使用工具结果）"}
     persona = payload.get("persona") or {}
-    persona_text = "\n".join(
-        f"- {label}：{persona.get(key)}" for key, label in (
-            ("name", "名字"), ("personality", "性格"), ("speaking_style", "说话风格"),
-            ("relationship", "与用户的关系"), ("background", "背景设定"),
-        ) if persona.get(key)
-    ) or "名字：树洞；性格：温和耐心的倾听者；与用户的关系：最信得过的朋友"
-    prompt = TREEHOLE_REPLY_PROMPT.format(
+    custom = (persona.get("custom_prompt") or "").strip()
+    if custom:
+        # 整段人设优先：模板字段不再注入，仅保留名字供称呼（见 docs/交接文档-Agent化改造.md）
+        persona_text = f"名字：{persona.get('name') or '树洞'}\n{custom}"
+    else:
+        persona_text = "\n".join(
+            f"- {label}：{persona.get(key)}" for key, label in (
+                ("name", "名字"), ("personality", "性格"), ("speaking_style", "说话风格"),
+                ("relationship", "与用户的关系"), ("background", "背景设定"),
+            ) if persona.get(key)
+        ) or "名字：树洞；性格：温和耐心的倾听者；与用户的关系：最信得过的朋友"
+    system = TREEHOLE_REPLY_PROMPT.format(
         persona=persona_text,
-        profile=_json.dumps(payload.get("profile") or {}, ensure_ascii=False) or "（暂无画像）",
+        profile=json.dumps(payload.get("profile") or {}, ensure_ascii=False) or "（暂无画像）",
         atoms="\n".join(f"- {a['content']}" for a in payload.get("atoms") or []) or "（暂无）",
         hits="\n".join(
             f"- [{h.get('created_at', '')[:10]}] {h.get('excerpt', '')}（来源 id：{h.get('id', '')}）"
             for h in payload.get("hits") or []
         ) or "（本次未命中）",
         summary_block=(
-            "【较早历史的滚动摘要】\n" + _json.dumps(payload["summary"], ensure_ascii=False)
+            "【较早历史的滚动摘要】\n" + json.dumps(payload["summary"], ensure_ascii=False)
             if payload.get("summary") else ""
         ),
-        tool_results=_json.dumps(payload.get("tool_results") or [], ensure_ascii=False),
-        history="\n".join(
-            f"{'用户' if h.get('role') == 'user' else '你'}：{h.get('content', '')}"
-            for h in payload.get("history") or []
-        ) or "（这是开场第一句）",
-        message=payload.get("message") or "",
+        tool_results=json.dumps(payload.get("tool_results") or [], ensure_ascii=False),
         intent_label=intent_labels.get(payload.get("intent") or "vent", "倾诉"),
     )
-    return llm.chat(prompt, timeout=60.0).strip()
+    messages: list[dict] = [{"role": "system", "content": system}]
+    for h in payload.get("history") or []:
+        role = "user" if h.get("role") == "user" else "assistant"
+        messages.append({"role": role, "content": h.get("content", "")})
+    if payload.get("image"):
+        current_content: object = [
+            {"type": "text", "text": payload.get("message") or ""},
+            {"type": "image_url", "image_url": {"url": payload["image"]}},
+        ]
+    else:
+        current_content = payload.get("message") or ""
+    messages.append({"role": "user", "content": current_content})
+    tools = ([{"type": "builtin_function", "function": {"name": "$web_search"}}]
+             if settings.treehole_web_search_enabled else None)
+    return llm.chat_messages(messages, cfg=settings.treehole_llm(), tools=tools,
+                             timeout=120.0).strip()
+
+
+def treehole_image_caption(image_bytes: bytes, fmt: str = "jpeg", user_text: str = "") -> str:
+    """④b 图片描述：人像详述外貌特征供日后「认出这个人」；写入 L0/L1 记忆管线。
+
+    通道选择：优先 VISION 组（qwen-vl 等对公众人物识别更开放，能答"这是谁"）；
+    未配视觉时回退树洞模型（Kimi 多模态，人脸指认偏保守）。失败记 degraded 返回空。
+    """
+    prompt = TREEHOLE_IMAGE_PROMPT.format(user_text=user_text or "（无）")
+    try:
+        if settings.vision_enabled:
+            return vision.vision_ask(
+                image_bytes, prompt, fmt, reasoning=settings.vision_reasoning("caption")
+            ).strip()[:200]
+        _require_treehole()
+        b64 = base64.b64encode(image_bytes).decode()
+        messages = [{"role": "user", "content": [
+            {"type": "text", "text": prompt},
+            {"type": "image_url",
+             "image_url": {"url": f"data:image/{fmt};base64,{b64}"}},
+        ]}]
+        return llm.chat_messages(messages, cfg=settings.treehole_llm(),
+                                 timeout=60.0).strip()[:200]
+    except Exception as exc:  # noqa: BLE001
+        _state.degraded = True
+        logger.warning("树洞图片 caption 失败，当轮降级为纯文本：%s", exc)
+        return ""
 
 
 def treehole_compress(old_summary: dict, messages: list[dict]) -> dict:
@@ -570,14 +621,12 @@ def treehole_compress(old_summary: dict, messages: list[dict]) -> dict:
 
     压缩失败保留旧摘要并记 degraded（回复已生成，不为写回牺牲当轮），下轮攒够再压。
     """
-    import json as _json
-
-    _require_llm()
+    _require_treehole()
     try:
         result = llm.chat_json(TREEHOLE_COMPRESS_PROMPT.format(
-            old_summary=_json.dumps(old_summary or {}, ensure_ascii=False),
-            messages=_json.dumps(messages, ensure_ascii=False),
-        ), timeout=60.0)
+            old_summary=json.dumps(old_summary or {}, ensure_ascii=False),
+            messages=json.dumps(messages, ensure_ascii=False),
+        ), timeout=60.0, cfg=settings.treehole_llm())
         return {
             "facts": [f for f in result.get("facts") or [] if isinstance(f, dict)][:20],
             "emotion_trail": str(result.get("emotion_trail") or "")[:200],

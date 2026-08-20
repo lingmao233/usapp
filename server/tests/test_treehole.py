@@ -14,11 +14,16 @@ os.environ["LLM_API_KEY"] = ""
 os.environ["EMBEDDING_API_KEY"] = ""
 os.environ["VISION_API_KEY"] = ""
 os.environ["VISION_MODEL"] = ""
+os.environ["TREEHOLE_API_KEY"] = ""
+os.environ["TREEHOLE_BASE_URL"] = ""
+os.environ["TREEHOLE_MODEL"] = ""
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
+import fakes  # noqa: E402
+from app import ai  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.main import app  # noqa: E402
 from app.services.memory import layers, scenarios  # noqa: E402
@@ -104,6 +109,122 @@ def test_persona_card(client: TestClient) -> None:
     assert saved["default"] is False and saved["name"] == "阿暖"
     assert saved["personality"] == "毒舌但心软" and saved["relationship"] == "损友"
     assert "【阿暖】" in _chat(client, acc["account_id"], "今天心情不太好")["reply"]
+
+
+def test_persona_custom_prompt_priority(client: TestClient, monkeypatch) -> None:
+    """整段人设优先：生成时 system 只带整段原文+名字，模板字段不再注入；
+    顺手锁定树洞门面走 TREEHOLE_* 配置（Kimi 默认值 + $web_search 联网工具）。"""
+    acc = _new_account(client)
+    r = client.put("/api/treehole/persona", json={
+        "account_id": acc["account_id"], "name": "阿青",
+        "personality": "模板性格不该出现", "custom_prompt": "你是阿青，说话像深夜电台。"})
+    assert r.status_code == 200, r.text
+    saved = client.get("/api/treehole/persona", params={"account_id": acc["account_id"]}).json()
+    assert saved["default"] is False and saved["custom_prompt"] == "你是阿青，说话像深夜电台。"
+
+    captured: dict = {}
+
+    def fake_chat_messages(messages, cfg=None, tools=None, timeout=120.0, max_tool_rounds=3):
+        captured.update(messages=messages, tools=tools, cfg=cfg)
+        return "收到"
+
+    monkeypatch.setattr(settings, "TREEHOLE_API_KEY", "test-key")
+    monkeypatch.setattr(settings, "TREEHOLE_WEB_SEARCH", "on")
+    monkeypatch.setattr(ai.llm, "chat_messages", fake_chat_messages)
+    monkeypatch.setattr(ai, "treehole_reply", fakes.REAL_IMPLS["treehole_reply"])  # 脱桩走真身
+    _chat(client, acc["account_id"], "今晚睡不着")
+
+    assert captured["cfg"] == ("test-key", "https://api.moonshot.cn/v1", "kimi-k2.6")
+    assert captured["tools"] == [{"type": "builtin_function", "function": {"name": "$web_search"}}]
+    system = captured["messages"][0]
+    assert system["role"] == "system"
+    assert "你是阿青，说话像深夜电台。" in system["content"]
+    assert "名字：阿青" in system["content"]
+    assert "模板性格不该出现" not in system["content"]
+    last = captured["messages"][-1]
+    assert last["role"] == "user" and last["content"] == "今晚睡不着"
+
+
+# ---------- 图片消息 ----------
+
+def _plant_upload(name: str) -> str:
+    """造一个合法命名的上传文件（caption 走桩，不校验图片内容），返回 image_url。"""
+    up = settings.upload_dir
+    up.mkdir(parents=True, exist_ok=True)
+    (up / name).write_bytes(b"fake-jpeg")
+    return f"/api/uploads/{name}"
+
+
+def test_chat_with_image(client: TestClient) -> None:
+    """图片消息：caption 写进 L0 原文（L1 抽取/检索的输入），image_url 落库并随 history 返回。"""
+    acc = _new_account(client)
+    url = _plant_upload("ab" * 16 + ".jpg")
+    r = client.post("/api/treehole/chat", json={
+        "account_id": acc["account_id"], "message": "这是我", "image_url": url})
+    assert r.status_code == 200, r.text
+    items = client.get("/api/treehole/history",
+                       params={"account_id": acc["account_id"]}).json()["items"]
+    user_msg = [m for m in items if m["role"] == "user"][-1]
+    assert user_msg["image_url"] == url
+    assert "这是我" in user_msg["content"]
+    assert "[图片：用户发来的jpeg图片（随图说：这是我）]" in user_msg["content"]
+
+
+def test_chat_image_only_and_bad_url(client: TestClient) -> None:
+    """纯图消息（空文本）不 400；非法/不存在的 image_url 降级为纯文本轮。"""
+    acc = _new_account(client)
+    url = _plant_upload("cd" * 16 + ".png")
+    r = client.post("/api/treehole/chat", json={
+        "account_id": acc["account_id"], "message": "", "image_url": url})
+    assert r.status_code == 200, r.text
+    items = client.get("/api/treehole/history",
+                       params={"account_id": acc["account_id"]}).json()["items"]
+    last_user = [m for m in items if m["role"] == "user"][-1]
+    assert last_user["content"].startswith("[图片：用户发来的png图片")
+
+    r = client.post("/api/treehole/chat", json={
+        "account_id": acc["account_id"], "message": "", "image_url": "/api/uploads/not-a-file"})
+    assert r.status_code == 200, r.text
+    items = client.get("/api/treehole/history",
+                       params={"account_id": acc["account_id"]}).json()["items"]
+    last_user = [m for m in items if m["role"] == "user"][-1]
+    assert last_user["content"] == "（发来一张图片）" and not last_user["image_url"]
+
+
+def test_web_search_echo_protocol(monkeypatch) -> None:
+    """$web_search 回声协议：finish_reason=tool_calls → 原样回显 arguments(role=tool) → stop。"""
+    calls: list[dict] = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append(json)
+
+        class R:
+            def raise_for_status(self) -> None:
+                pass
+
+            def json(self) -> dict:
+                if len(calls) == 1:
+                    return {"choices": [{"finish_reason": "tool_calls", "message": {
+                        "role": "assistant", "content": "",
+                        "tool_calls": [{"id": "tc1", "type": "builtin_function", "function": {
+                            "name": "$web_search", "arguments": '{"q":"今天天气"}'}}]}}]}
+                return {"choices": [{"finish_reason": "stop",
+                                     "message": {"role": "assistant", "content": "今天晴"}}]}
+
+        return R()
+
+    monkeypatch.setattr(ai.llm.httpx, "post", fake_post)
+    out = ai.llm.chat_messages(
+        [{"role": "user", "content": "今天天气怎么样"}],
+        cfg=("k", "https://api.moonshot.cn/v1", "kimi-k2.6"),
+        tools=[{"type": "builtin_function", "function": {"name": "$web_search"}}])
+    assert out == "今天晴"
+    assert len(calls) == 2
+    second = calls[1]["messages"]
+    assert second[-2]["role"] == "assistant" and second[-2]["tool_calls"][0]["id"] == "tc1"
+    # 回显时 type 归一为 OpenAI 线格式 "function"（builtin_function 会被 kimi.com/coding 网关 400）
+    assert second[-2]["tool_calls"][0]["type"] == "function"
+    assert second[-1]["role"] == "tool" and second[-1]["content"] == '{"q":"今天天气"}'
 
 
 # ---------- 护栏：强烈自伤触发 / 普通情绪不误伤 ----------

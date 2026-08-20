@@ -517,11 +517,12 @@ export function createApi(req: RequestFn) {
 
     /* ---------------- 情绪树洞（账号级私密对话） ---------------- */
 
-    // 发一句：整包返回 {reply, citations, tools_used, intent, guardrail}；guardrail 话术照常展示
-    treeholeChat: (account_id: string, message: string) =>
+    // 发一句：整包返回 {reply, citations, tools_used, intent, guardrail}；guardrail 话术照常展示。
+    // 图片消息先走 uploadImage 拿 URL 再传 image_url；纯图消息 message 可空
+    treeholeChat: (account_id: string, message: string, image_url?: string) =>
       req<TreeholeChatResp>("/api/treehole/chat", {
         method: "POST",
-        body: { account_id, message },
+        body: { account_id, message, image_url: image_url || undefined },
       }),
 
     // 历史原文（服务端包 {items}，正序全量）

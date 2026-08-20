@@ -393,6 +393,7 @@ export interface TreeholeMessage {
   id: string
   role: "user" | "assistant"
   content: string
+  image_url?: string
   created_at: string
 }
 
@@ -412,12 +413,14 @@ export interface TreeholeChatResp {
   guardrail: boolean
 }
 
-/** 树洞人设卡：未设立时服务端合成默认倾听者并标 default=true（前端据此显示「去设立」引导） */
+/** 树洞人设卡：未设立时服务端合成默认倾听者并标 default=true（前端据此显示「去设立」引导）。
+ * custom_prompt 为整段粘贴人设：非空时生成优先于模板字段（name 仍用于界面显示） */
 export interface TreeholePersona {
   name: string
   personality: string
   speaking_style: string
   relationship: string
   background: string
+  custom_prompt?: string
   default: boolean
 }

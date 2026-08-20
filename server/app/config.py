@@ -51,6 +51,38 @@ class Settings:
     # off（默认）= 不联网，web_search_food 直接返回 None 走降级
     LLM_WEB_SEARCH: str = os.getenv("LLM_WEB_SEARCH", "off")
 
+    # 树洞专属模型（树洞全链路：路由/改写/工具/回复/压缩/图片 caption）：
+    # TREEHOLE_API_KEY 非空即启用独立厂商；BASE_URL 默认 Kimi，MODEL 默认 kimi-k2.6；
+    # 整组留空 = 回退 LLM_* 组
+    TREEHOLE_API_KEY: str = os.getenv("TREEHOLE_API_KEY", "")
+    TREEHOLE_BASE_URL: str = os.getenv("TREEHOLE_BASE_URL", "")
+    TREEHOLE_MODEL: str = os.getenv("TREEHOLE_MODEL", "")
+    # 树洞联网搜索（Kimi 内置 $web_search，按次计费）：on（默认）= 开，off = 关；
+    # 只在生效厂商是 Kimi（moonshot）时真正下发，其他厂商自动忽略
+    TREEHOLE_WEB_SEARCH: str = os.getenv("TREEHOLE_WEB_SEARCH", "on")
+
+    # LLM 采样温度（空 = 默认 0.7）：Kimi k3 等推理模型只接受 temperature=1，用这类模型时设 1
+    LLM_TEMPERATURE: str = os.getenv("LLM_TEMPERATURE", "")
+
+    def treehole_llm(self) -> tuple[str, str, str]:
+        """树洞生效的 (api_key, base_url, model)：TREEHOLE_API_KEY 非空走 Kimi 组（带默认值），
+        否则整体回退 LLM_* 组。"""
+        if self.TREEHOLE_API_KEY:
+            return (
+                self.TREEHOLE_API_KEY,
+                self.TREEHOLE_BASE_URL or "https://api.moonshot.cn/v1",
+                self.TREEHOLE_MODEL or "kimi-k2.6",
+            )
+        return (self.LLM_API_KEY, self.LLM_BASE_URL, self.LLM_MODEL)
+
+    @property
+    def treehole_web_search_enabled(self) -> bool:
+        """树洞联网开关：TREEHOLE_WEB_SEARCH=on（默认）且生效厂商是 Kimi 才启用。
+        Kimi 系入口：platform 的 moonshot.cn 与编程套餐的 kimi.com/coding 都算。"""
+        _, base_url, _ = self.treehole_llm()
+        kimi_hosted = "moonshot" in base_url or "kimi.com" in base_url
+        return self.TREEHOLE_WEB_SEARCH.strip().lower() == "on" and kimi_hosted
+
     # Redis（可选，连不上自动降级进程内字典）
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 

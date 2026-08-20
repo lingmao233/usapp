@@ -49,6 +49,13 @@
 
 **前端新增**：`pages/TreeHole.tsx`（聊天 UI：消息流 + 输入框 + 人设卡设立入口），Wall 页加入口卡。复用 Markdown 组件渲染回复。
 
+**2026-08-20 增强（Kimi 化 + 图片 + 整段人设 + 联网）**：
+
+- **专属模型配置**：树洞全链路（①②③④⑥ + 图片 caption + langmem L1 抽取）走 `TREEHOLE_API_KEY/BASE_URL/MODEL`（默认 Kimi `https://api.moonshot.cn/v1` + `kimi-k2.6`）；整组留空回退 `LLM_*`。`llm.chat/chat_json` 加 `cfg` 参数承载多厂商配置
+- **联网搜索**：挂 Kimi 内置 `$web_search`（builtin_function，回声协议：tool_calls 的 arguments 以 role=tool 原样回传，Kimi 服务端执行搜索），`llm.chat_messages` 实现工具循环（≤3 轮）；`TREEHOLE_WEB_SEARCH=on` 默认开、按次计费，仅 moonshot 厂商生效
+- **图片消息**：`treehole_messages.image_url`；服务端读上传图（优先 1600px 展示副本）→ `treehole_image_caption`（**优先 VISION 组**——qwen-vl 等对公众人物识别更开放，能答"这是谁"；未配视觉回退树洞 Kimi 多模态——人像详述外貌特征供日后「认出这个人」）→ caption 以 `[图片：…]` 标记写入 L0 原文（进 L1 抽取与检索），原图 data URL 随 ④ 的当前消息直发模型；读图/caption 失败均降级纯文本轮，坏 URL 不落库
+- **整段人设**：`treehole_persona.custom_prompt`，非空时生成完全优先于模板五字段（name 仍注入供称呼）；前端 PersonaSheet 分「模板填写 / 整段粘贴」两档，模板档保存会清空 custom_prompt
+
 ## 三、方案评审团（多 agent 协作）
 
 **改动点**：`services/plans.py` 的方案生成从「LLM 抽目的地 → 高德数据 → LLM 成稿」扩展为 LangGraph 编排：

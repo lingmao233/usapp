@@ -21,14 +21,14 @@ def _now() -> str:
 
 # ---------- L0 对话原文 ----------
 
-def append_message(account_id: str, role: str, content: str) -> str:
-    """追加一条树洞消息，返回消息 id（供 L1 原子回溯来源）。"""
+def append_message(account_id: str, role: str, content: str, image_url: str = "") -> str:
+    """追加一条树洞消息，返回消息 id（供 L1 原子回溯来源）。image_url 为图片消息的原图 URL。"""
     conn = get_conn()
     msg_id = uuid.uuid4().hex[:12]
     conn.execute(
-        "INSERT INTO treehole_messages (id, account_id, role, content, created_at)"
-        " VALUES (?, ?, ?, ?, ?)",
-        (msg_id, account_id, role, content, _now()),
+        "INSERT INTO treehole_messages (id, account_id, role, content, image_url, created_at)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
+        (msg_id, account_id, role, content, image_url, _now()),
     )
     conn.commit()
     return msg_id
@@ -38,7 +38,7 @@ def list_messages(account_id: str, limit: int | None = None) -> list[dict]:
     """按时间正序读对话原文；limit 截尾（最近 N 条）。"""
     conn = get_conn()
     rows = conn.execute(
-        "SELECT id, role, content, created_at FROM treehole_messages"
+        "SELECT id, role, content, image_url, created_at FROM treehole_messages"
         " WHERE account_id = ? ORDER BY created_at, rowid",
         (account_id,),
     ).fetchall()
