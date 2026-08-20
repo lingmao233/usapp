@@ -222,7 +222,7 @@ def test_recognize_calorie_table_and_model_fallback(
     """命中查表：kcal = 表值 × 克数 / 100，source=table；未命中回退模型 kcal，source=model。"""
     controlled_table("米饭（蒸）", 116, 2.6, 0.3, 25.9)
     uid = client.post("/api/circles", json={"name": "热量查表圈", "nickname": "阿澈"}).json()["account_id"]
-    monkeypatch.setattr(ai, "recognize_food", lambda path, hint="": {
+    monkeypatch.setattr(ai, "recognize_food", lambda path, hint="", **_: {
         "items": [
             {"name": "米饭", "grams": 200, "kcal": 9999},   # 查表命中：116×2=232，忽略模型值
             {"name": "神秘料理", "grams": 100, "kcal": 500},  # 未命中：回退模型值
@@ -236,7 +236,8 @@ def test_recognize_calorie_table_and_model_fallback(
     entry = r.json()["entry"]
     assert entry["status"] == "pending"
     items = entry["items"]
-    assert items[0] == {"name": "米饭", "kcal": 232, "source": "table", "grams": 200}
+    assert items[0] == {"name": "米饭", "kcal": 232, "source": "table", "grams": 200,
+                        "kcal_per_100g": 116.0}
     assert items[1] == {"name": "神秘料理", "kcal": 500, "source": "model", "grams": 100}
     assert items[2] == {"name": "米饭", "kcal": 300, "source": "model"}
     assert entry["total_kcal"] == 1032

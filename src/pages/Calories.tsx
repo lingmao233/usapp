@@ -20,6 +20,58 @@ function equivList(eq?: Record<string, ExerciseEquiv>): ExerciseEquiv[] {
   return Object.values(eq ?? {}).filter((v) => v && typeof v.minutes === "number" && v.minutes > 0)
 }
 
+/** 克数内联编辑：点数字进编辑态，Enter/失焦保存（服务端按 kcal_per_100g 重算并记纠正） */
+function GramsField({ grams, onSave }: { grams: number; onSave: (g: number) => Promise<void> }) {
+  const [editing, setEditing] = useState(false)
+  const [text, setText] = useState("")
+  const [busy, setBusy] = useState(false)
+
+  async function save() {
+    const g = Number(text)
+    setEditing(false)
+    if (busy || !Number.isFinite(g) || g <= 0 || g > 5000 || Math.round(g) === grams) return
+    setBusy(true)
+    try {
+      await onSave(g)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (!editing) {
+    return (
+      <button
+        className="text-stone-400 underline decoration-dotted underline-offset-4 hover:text-[#264653] transition-colors"
+        title="点我改克数（改完会帮下次估得更准）"
+        onClick={() => {
+          setText(String(grams))
+          setEditing(true)
+        }}
+      >
+        {grams}g
+      </button>
+    )
+  }
+  return (
+    <span className="inline-flex items-baseline gap-0.5">
+      <input
+        autoFocus
+        type="number"
+        className="us-input w-20 !py-0.5 !text-xs"
+        value={text}
+        disabled={busy}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !e.nativeEvent.isComposing) void save()
+          if (e.key === "Escape") setEditing(false)
+        }}
+        onBlur={() => void save()}
+      />
+      <span className="text-xs text-stone-400">g</span>
+    </span>
+  )
+}
+
 /** 待确认卡（识别时已落库 pending 行，带 id；确认时只回传 id + 可改的总热量/备注） */
 interface PendingEntry {
   id: string
@@ -135,6 +187,42 @@ export default function Calories({ accountId }: { accountId: string }) {
   /** 丢弃：pending 行已在服务端，按 id 删掉（热量没有删除端点，丢弃仅本地移除卡片） */
   function handleDiscard() {
     setPending(null)
+  }
+
+  /** 待确认卡改克数：服务端重算后整卡刷新（kcal/总热量/运动等效都变） */
+  async function handlePendingGrams(index: number, g: number) {
+    if (!pending) return
+    try {
+      const res = await api.updateCalorieItem(pending.id, accountId, index, g)
+      const e = res.entry
+      setPending({
+        id: e.id,
+        items: e.items.map((x) => ({
+          name: x.name,
+          kcal: x.kcal,
+          brand: x.brand,
+          grams: x.grams,
+          source: x.source,
+          staging_id: x.staging_id,
+        })),
+        total: String(Math.round(e.total_kcal)),
+        note: e.note || pending.note,
+        exercise_equiv: e.exercise_equiv ?? {},
+      })
+    } catch {
+      setSubmitError("克数没改成，再试一次")
+    }
+  }
+
+  /** 已入账记录改克数：重算 + 触发超预算联动，列表重载 */
+  async function handleEntryGrams(entryId: string, index: number, g: number) {
+    try {
+      const res = await api.updateCalorieItem(entryId, accountId, index, g)
+      setAdjustNotice(res.adjustment?.content ?? "")
+      await load()
+    } catch {
+      setSubmitError("克数没改成，再试一次")
+    }
   }
 
   async function handleManual() {
@@ -256,7 +344,12 @@ export default function Calories({ accountId }: { accountId: string }) {
                     <span>
                       {x.brand ? <span className="text-[#264653]/70">{x.brand}·</span> : null}
                       {x.name}
-                      {x.grams ? <span className="text-stone-400"> {x.grams}g</span> : null}
+                      {x.grams ? (
+                        <>
+                          {" "}
+                          <GramsField grams={x.grams} onSave={(g) => handlePendingGrams(i, g)} />
+                        </>
+                      ) : null}
                       {x.source === "table" && (
                         <span className="ml-1 text-[10px] text-[#2A9D8F] border border-[#2A9D8F]/40 rounded px-1 align-middle">
                           查表
@@ -293,7 +386,9 @@ export default function Calories({ accountId }: { accountId: string }) {
                 吃掉这些 ≈ {equivList(pending.exercise_equiv).map(equivText).join(" / ")}
               </p>
             )}
-            <p className="text-xs text-stone-400 mb-3">估算仅供参考，误差可能不小</p>
+            <p className="text-xs text-stone-400 mb-3">
+              估算仅供参考；克数点一下就能改，改完会帮下次估得更准
+            </p>
             <div className="flex gap-3">
               <button className="us-btn" disabled={confirmBusy} onClick={handleConfirm}>
                 {confirmBusy ? "入账中…" : "确认入账"}
@@ -394,6 +489,27 @@ export default function Calories({ accountId }: { accountId: string }) {
                       : e.note || "手动录入"}
                   </span>
                 </div>
+                {/* 有菜品明细（拍照识别）时逐条列出，克数可点改（改完重算并记纠正） */}
+                {e.items.some((x) => x.grams) && (
+                  <div className="flex flex-col gap-0.5 mt-1 pl-1">
+                    {e.items.map((x, xi) => (
+                      <p key={xi} className="text-xs text-stone-500">
+                        {x.brand ? `${x.brand}·` : ""}
+                        {x.name}
+                        {x.grams ? (
+                          <>
+                            {" "}
+                            <GramsField
+                              grams={x.grams}
+                              onSave={(g) => handleEntryGrams(e.id, xi, g)}
+                            />
+                          </>
+                        ) : null}
+                        <span className="text-stone-400"> · {Math.round(x.kcal)} kcal</span>
+                      </p>
+                    ))}
+                  </div>
+                )}
                 {equivList(e.exercise_equiv).length > 0 && (
                   <p className="text-xs text-stone-400 mt-1">
                     ≈ {equivList(e.exercise_equiv).map(equivText).join(" / ")}

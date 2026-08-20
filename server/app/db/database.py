@@ -261,6 +261,21 @@ CREATE TABLE IF NOT EXISTS calorie_entries (
     created_at TEXT NOT NULL
 );
 
+-- 克数纠正记录：用户改克数时留痕（AI 原估 vs 用户修正），识别时作为校准样例注入，
+-- 让分量估计随使用越来越贴合这个用户（在线校准，非模型微调）
+CREATE TABLE IF NOT EXISTS calorie_gram_corrections (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL REFERENCES accounts(id),
+    name TEXT NOT NULL,                    -- 菜品名
+    brand TEXT NOT NULL DEFAULT '',
+    ai_grams REAL NOT NULL,                -- AI 原估克数
+    user_grams REAL NOT NULL,              -- 用户改成的克数
+    entry_id TEXT NOT NULL DEFAULT '',     -- 来源热量记录
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_gram_corrections_account
+    ON calorie_gram_corrections(account_id, name);
+
 -- 鞭策：goal_id 与 plan_date 必居其一——目标鞭策=goal_id 非空/plan_date 空；
 -- 计划鞭策=plan_date='YYYY-MM-DD'（被鞭策的当天）/goal_id 空。限频对人不对类型
 CREATE TABLE IF NOT EXISTS nudges (

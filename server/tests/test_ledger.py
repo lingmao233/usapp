@@ -182,7 +182,7 @@ def test_recognize_then_confirm_expense_flow(client: TestClient, monkeypatch) ->
 def test_recognize_then_confirm_calorie_flow(client: TestClient, monkeypatch) -> None:
     """食物识别 pending（菜品明细 + MET 运动等效）→ 确认时改数字重算等效；重复确认幂等。"""
     uid = _new_user(client, "热量确认圈")
-    monkeypatch.setattr(ai, "recognize_food", lambda path, hint="": {
+    monkeypatch.setattr(ai, "recognize_food", lambda path, hint="", **_: {
         "items": [{"name": "米饭", "kcal": 232}, {"name": "番茄炒蛋", "kcal": 170}],
         "note": "伪装识别",
     })
@@ -210,6 +210,106 @@ def test_recognize_then_confirm_calorie_flow(client: TestClient, monkeypatch) ->
     # 重复确认幂等：数字不再被改
     client.post("/api/calories", json={"account_id": uid, "id": entry["id"], "total_kcal": 9999})
     assert client.get("/api/calories", params={"account_id": uid, "date": TODAY}).json()["consumed_kcal"] == 500
+
+
+# ---------- 改克数：重算 + 纠正落库 + 校准注入 ----------
+
+def test_update_grams_recalculates(client: TestClient, monkeypatch) -> None:
+    """查表命中的菜品改克数：kcal 按 kcal_per_100g 重算，total/运动等效/当日累计同步；
+    pending 与已入账两种状态都可改。"""
+    uid = _new_user(client, "克数圈")
+    monkeypatch.setattr(ai, "recognize_food", lambda path, hint="", **_: {
+        "items": [{"name": "米饭", "grams": 200, "kcal": 232}], "note": ""})
+    r = client.post("/api/calories/recognize", json={
+        "account_id": uid, "image_url": _image_url()})
+    entry = r.json()["entry"]
+    item = entry["items"][0]
+    assert item["grams"] == 200 and item["kcal"] == 232  # 116 kcal/100g × 200g
+    assert item["kcal_per_100g"] == 116.0 and item["source"] == "table"
+
+    # pending 态改 200 → 400g：热量翻倍，总热量跟着变
+    r = client.put(f"/api/calories/{entry['id']}/items",
+                   json={"account_id": uid, "index": 0, "grams": 400})
+    assert r.status_code == 200, r.text
+    entry = r.json()["entry"]
+    assert entry["items"][0]["grams"] == 400 and entry["items"][0]["kcal"] == 464
+    assert entry["total_kcal"] == 464
+    running = entry["exercise_equiv"]["running"]["minutes"]
+    assert running == round(464 / (8.3 * 65) * 60)  # 默认体重 65kg 重算
+
+    # 确认入账后再改 400 → 300g：当日累计同步为 348
+    client.post("/api/calories", json={"account_id": uid, "id": entry["id"]})
+    r = client.put(f"/api/calories/{entry['id']}/items",
+                   json={"account_id": uid, "index": 0, "grams": 300})
+    assert r.status_code == 200
+    body = client.get("/api/calories", params={"account_id": uid, "date": TODAY}).json()
+    assert body["consumed_kcal"] == 348
+
+
+def test_update_grams_model_fallback_scales_linearly(client: TestClient, monkeypatch) -> None:
+    """模型估值（查表全不中、无 kcal_per_100g）改克数：按旧值线性缩放。"""
+    uid = _new_user(client, "火星料理圈")
+    monkeypatch.setattr(ai, "recognize_food", lambda path, hint="", **_: {
+        "items": [{"name": "火星料理", "grams": 200, "kcal": 500}], "note": ""})
+    r = client.post("/api/calories/recognize", json={
+        "account_id": uid, "image_url": _image_url()})
+    item = r.json()["entry"]["items"][0]
+    assert item["source"] == "model" and "kcal_per_100g" not in item
+    r = client.put(f"/api/calories/{r.json()['entry']['id']}/items",
+                   json={"account_id": uid, "index": 0, "grams": 100})
+    assert r.status_code == 200
+    assert r.json()["entry"]["items"][0]["kcal"] == 250  # 500 × 100/200
+
+
+def test_update_grams_records_correction_and_injects_calibration(client: TestClient, monkeypatch) -> None:
+    """改克数落一条纠正（ai_grams/user_grams）；下次识别时该账号的纠正注入 prompt 校准。"""
+    uid = _new_user(client, "校准圈")
+    monkeypatch.setattr(ai, "recognize_food", lambda path, hint="", **_: {
+        "items": [{"name": "米饭", "grams": 200, "kcal": 232}], "note": ""})
+    r = client.post("/api/calories/recognize", json={
+        "account_id": uid, "image_url": _image_url()})
+    entry = r.json()["entry"]
+    client.put(f"/api/calories/{entry['id']}/items",
+               json={"account_id": uid, "index": 0, "grams": 350})
+    conn = _db()
+    rows = conn.execute(
+        "SELECT name, ai_grams, user_grams FROM calorie_gram_corrections WHERE account_id = ?",
+        (uid,)).fetchall()
+    assert [(r["name"], r["ai_grams"], r["user_grams"]) for r in rows] == [("米饭", 200.0, 350.0)]
+
+    # 同值再保存不灌水；随后新一次识别应带上这条校准样例
+    client.put(f"/api/calories/{entry['id']}/items",
+               json={"account_id": uid, "index": 0, "grams": 350})
+    seen: dict = {}
+    def capture(path, hint="", calibration=None, **_):
+        seen["calibration"] = calibration
+        return {"items": [{"name": "米饭", "grams": 350, "kcal": 406}], "note": ""}
+    monkeypatch.setattr(ai, "recognize_food", capture)
+    client.post("/api/calories/recognize", json={"account_id": uid, "image_url": _image_url()})
+    calib = seen["calibration"]
+    assert len(calib) == 1 and calib[0]["name"] == "米饭"
+    assert calib[0]["ai_grams"] == 200 and calib[0]["user_grams"] == 350
+    rows = conn.execute(
+        "SELECT COUNT(*) AS c FROM calorie_gram_corrections WHERE account_id = ?", (uid,)
+    ).fetchone()
+    assert rows["c"] == 1  # 同值幂等，没写第二行
+
+
+def test_update_grams_validation(client: TestClient, monkeypatch) -> None:
+    """改克数校验：记录不存在 404、别人的记录 403、序号越界/克数非法/无克数条目 400。"""
+    uid = _new_user(client, "校验圈")
+    other = _new_user(client, "校验圈外人")
+    monkeypatch.setattr(ai, "recognize_food", lambda path, hint="", **_: {
+        "items": [{"name": "米饭", "grams": 200, "kcal": 232}], "note": ""})
+    entry = client.post("/api/calories/recognize", json={
+        "account_id": uid, "image_url": _image_url()}).json()["entry"]
+    base = f"/api/calories/{entry['id']}/items"
+    assert client.put(base, json={"account_id": other, "index": 0, "grams": 300}).status_code == 403
+    assert client.put(base, json={"account_id": uid, "index": 5, "grams": 300}).status_code == 400
+    assert client.put(base, json={"account_id": uid, "index": 0, "grams": 0}).status_code == 400
+    assert client.put(base, json={"account_id": uid, "index": 0, "grams": 99999}).status_code == 400
+    assert client.put("/api/calories/ghost/items",
+                      json={"account_id": uid, "index": 0, "grams": 300}).status_code == 404
 
 
 # ---------- 热量超预算 ↔ 计划 adjust 联动 ----------

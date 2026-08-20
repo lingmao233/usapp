@@ -496,6 +496,14 @@ export function createApi(req: RequestFn) {
         { method: "POST", body: { account_id, id, total_kcal, note } },
       ),
 
+    // 改某菜品的克数（pending/已入账都可）：服务端按 kcal_per_100g 重算 kcal 与总热量，
+    // 并记一条克数纠正（后续识别会拿纠正记录校准分量估计）
+    updateCalorieItem: (id: string, account_id: string, index: number, grams: number) =>
+      req<{ entry: CalorieEntry; adjustment?: { content?: string } | null }>(
+        `/api/calories/${id}/items`,
+        { method: "PUT", body: { account_id, index, grams } },
+      ),
+
     // 按日查询：{date, items, consumed_kcal, budget_kcal?}
     listCalories: (account_id: string, date: string) =>
       req<CalorieDay>(`/api/calories?account_id=${account_id}&date=${date}`),

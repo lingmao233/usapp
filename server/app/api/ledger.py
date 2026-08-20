@@ -96,6 +96,20 @@ def add_or_confirm_calorie(body: CalorieIn):
     return svc.add_calorie(body.account_id, body.total_kcal, body.note or "")
 
 
+class CalorieItemIn(BaseModel):
+    """改某菜品的克数：index 为 items 下标；kcal 服务端按 kcal_per_100g 重算。"""
+
+    account_id: str
+    index: int
+    grams: float
+
+
+@calories_router.put("/{entry_id}/items")
+def update_calorie_item(entry_id: str, body: CalorieItemIn):
+    """改克数（pending/已入账都可改）：返回更新后的整条记录与超预算联动结果。"""
+    return svc.update_calorie_item(entry_id, body.account_id, body.index, body.grams)
+
+
 @calories_router.get("")
 def list_calories(account_id: str, date: str | None = None):
     return svc.list_calories(account_id, date)

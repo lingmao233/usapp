@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from app import ai  # noqa: E402
 from app.config import settings  # noqa: E402
-from app.db.database import encode_embedding, get_conn  # noqa: E402
+from app.db.database import encode_embedding, get_conn, init_db  # noqa: E402
 from app.main import app  # noqa: E402
 from app.services import nutrition  # noqa: E402
 
@@ -35,19 +35,24 @@ def client():
 
 @pytest.fixture
 def env(client: TestClient):
-    """每个测试前清 staging 两表；收尾清掉测试加的行（测试进程共享一个库，不给其他文件留垃圾）。
+    """每个测试前清 staging 两表 + 正式成分表；收尾清掉测试加的行并补灌 vendor 数据。
 
+    「正式表查不到」是本文件全部用例的前提——共享库的表状态取决于上游文件的执行顺序
+    （test_nutrition 的清表/补灌都会改变它），不可依赖，每个测试前显式清空；
+    收尾 init_db 把 vendor 数据补灌回去（空表才灌，幂等），不给下游文件留空表。
     测试食物名统一「共建」前缀，正式表测试行按此前缀清理（vendor 数据无此前缀）。
     """
     conn = get_conn()
     conn.execute("DELETE FROM food_staging_approvals")
     conn.execute("DELETE FROM food_nutrition_staging")
+    conn.execute("DELETE FROM food_nutrition")
     conn.commit()
     yield client
     conn.execute("DELETE FROM food_staging_approvals")
     conn.execute("DELETE FROM food_nutrition_staging")
     conn.execute("DELETE FROM food_nutrition WHERE name LIKE '共建%'")
     conn.commit()
+    init_db()
 
 
 def _new_user(client: TestClient, name: str = "共建测试圈") -> str:
@@ -168,7 +173,7 @@ def test_add_food_validation(env) -> None:
 # ---------- 查表未命中 → 联网搜 → staging ----------
 
 def _patch_recognize(monkeypatch, name: str, grams: float, model_kcal: float) -> None:
-    monkeypatch.setattr(ai, "recognize_food", lambda path, hint="": {
+    monkeypatch.setattr(ai, "recognize_food", lambda path, hint="", **_: {
         "items": [{"name": name, "grams": grams, "kcal": model_kcal}],
         "note": "伪装识别",
     })
@@ -186,7 +191,7 @@ def test_recognize_web_hit_writes_staging(env, monkeypatch) -> None:
     row = _staging_row("共建神秘果")
     assert row is not None
     assert item == {"name": "共建神秘果", "kcal": 180, "source": "web_pending",
-                    "staging_id": row["id"], "grams": 150}
+                    "staging_id": row["id"], "grams": 150, "kcal_per_100g": 120.0}
     assert row["source"] == "web" and row["verified"] == 1 and row["approvals"] == 0
     assert row["protein_per_100g"] == 1.0 and row["fat_per_100g"] is None
 

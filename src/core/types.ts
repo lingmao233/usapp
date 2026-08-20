@@ -255,6 +255,8 @@ export interface CalorieItem {
   brand?: string
   /** 模型估计的分量（克），识别时才有 */
   grams?: number
+  /** 每 100g 热量（查表/联网命中时落库）：改克数按它重算 kcal，不用重新匹配 */
+  kcal_per_100g?: number
   /** table=查《中国食物成分表》计算，model=模型估值兜底，
    *  staging=命中共建预数据库（待核实），web_pending=联网搜到（待认可） */
   source?: string

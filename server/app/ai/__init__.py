@@ -402,16 +402,23 @@ def recognize_receipt(image_path: str) -> list[dict] | None:
         return None
 
 
-def recognize_food(image_path: str, hint: str = "") -> dict | None:
+def recognize_food(image_path: str, hint: str = "", calibration: list[dict] | None = None) -> dict | None:
     """食物照片识别 + 热量估算：开关与降级口径同 recognize_receipt。
 
     hint 为用户补充描述（如"红烧肉一碗约 300g"），经 FOOD_PROMPT 的 {hint} 占位注入，可空。
+    calibration 为该用户的历史克数纠正（[{name, ai_grams, user_grams}]），注入 prompt
+    让分量估计贴合用户习惯（在线校准，非模型微调）。
     """
     if not settings.vision_enabled:
         return None
+    calib_text = "\n".join(
+        f"- {c['name']}：你上次估 {c['ai_grams']:g}g，用户实际是 {c['user_grams']:g}g"
+        for c in calibration or []
+    ) or "（无）"
     try:
         result = vision.vision_json(
-            image_path, FOOD_PROMPT.format(hint=hint), reasoning=settings.vision_reasoning("food")
+            image_path, FOOD_PROMPT.format(hint=hint, calibration=calib_text),
+            reasoning=settings.vision_reasoning("food"),
         )
         if not isinstance(result, dict):
             raise ValueError(f"食物识别应返回对象，实际为 {type(result).__name__}")
