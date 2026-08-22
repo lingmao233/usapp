@@ -245,3 +245,41 @@
 - **验证**：真实端点全链路 curl——问天气、问科技新闻均返回联网结果（finish_reason 走完整 tool_calls→stop 回路）；pytest 207/207。
 - **预防**：第三方协议实现别只信文档"原样回传"，必须用真实端点跑完整回路才算数；厂商/入口判断用域名清单，别用单个关键字。
 - **备注（非 bug）**："看照片猜明星"是模型的人脸识别安全策略（各厂商一致），联网搜索解决不了；用户告诉树洞这人是谁后，外貌特征会经 caption → L1 记忆管线沉淀，之后能"认出"。
+
+## BUG-018 热量识别误报"未配置视觉模型"：阿里端点拒 low/high 思考档 + 失败被谎报
+
+- **日期**：2026-08-20
+- **环境**：腾讯云生产（代码问题，任何配该阿里端点的环境同在）
+- **现象**：服务器热量拍照识别报"未配置视觉模型"，但视觉配置齐全（启动日志 vision: on）且记账（小票识别）正常。
+- **根因（两条）**：
+  1. **厂商参数兼容**：该阿里端点（qwen3-vl-plus）只认 `reasoning_effort=minimal`/`enable_thinking=false`/不传参；`low/medium/high` 被网关映射成非法 thinking_budget 直接 400（"must be a positive integer and not greater than 0"）。热量场景默认 `low` → 必挂；caption 场景默认 `high` 同样中招（碎片图片 caption 在生产一直静默失败）。
+  2. **错误被谎报**：视觉调用任何失败都被门面吞掉返回 None，路由层一律报"未配置视觉模型"——排障方向被误导去查配置，而不是查调用。
+- **修复**：`vision.py` 收敛出 `_post`——带思考参数的 400（报文含 thinking/reasoning）剥掉该参数重试一次（不思考好过不可用）；`recognize_food` 调用失败改抛 RuntimeError，服务层如实 502「视觉模型调用失败」；只有真没配 key 才报"未配置"。测试环境隔离：conftest/smoke 清 key 清单补 `LLM_WEB_SEARCH` 等开关项（本机 .env 开了联网会污染"全不中回退"类断言）；`test_nutrition_staging` 的 web 开关断言改为按生效行为断言。
+- **验证**：真实端点实测 low/medium/high 全部自愈返回 200；pytest 216/216；smoke 62 断言；`npm run build` 通过。
+- **预防**：接入新厂商/新模型时把 `reasoning_effort` 各档位全试一遍（厂商间映射差异极大）；**"未配置"与"调用失败"必须分流**——降级不能吞掉真实错误，否则排障方向全错。
+
+## BUG-019 拍一杯茶算出肉肠热量：LIKE 单字误吸 + 联网兜底是假通道
+
+- **日期**：2026-08-21
+- **环境**：本机 dev + 生产（代码问题，两端同在）
+- **现象**：用户拍茶识别热量，"相同克数热量天差地别"；日志可见联网查询连续 read timeout 后按模型估值入账。
+- **根因（两条）**：
+  1. **LIKE 单字误吸**：vendor 成分表没有"茶"品类，而 LIKE 归一互含规则让单字查询"茶"命中了"茶肠"（329 kcal/100g 的肉肠）——零热量饮料按肉肠算；模型换个叫法（乌龙茶/绿茶）又全不中 → 估值每次乱飘。实测 `match("茶")→茶肠` 复现确认。
+  2. **联网兜底是假通道**：`web_search_food` 只走 LLM_* + `enable_search`（阿里百炼私有写法），而 LLM_* 指向 Kimi 端点时该参数被静默忽略——没联网硬答，k3 思考又慢，每个未命中菜名都 60s 超时后才估值返回。
+- **修复**：
+  - `nutrition._like_rows` 单字护栏：归一后长度 <2 的查询只收完全一致，不做互含扩展（双字互含行为不变）
+  - `web_search_food` 通道分流：树洞配置为 Kimi 系（moonshot/kimi.com）时走 `$web_search` 回声协议（真联网，实测乌龙茶返回 1 kcal/100g 正确值）；其余厂商维持 enable_search
+  - 配套提速（用户 5s 目标，grilling 定案）：联网兜底移出热路径（`backfill_food_web` 后台异步入库，与用户是否确认入账解耦——估值被丢弃也照入）；视觉识别改两级策略（food 默认 off 快出，模型自报包装食品但没读出品牌时带思考重试一次——实测 off 漏三养、on 认出，1.8s vs 14.9s）；识别改送 800px 副本（`_s.jpg`）；视觉调用统一 temperature=0；embed_batch 加 429 退避重试
+  - 确认入账计认可适配：item 无 staging_id 时按名字反查 staging（后台补库已在响应时完成）
+- **验证**：pytest 219/219；smoke 62 断言；真实端点：两级策略重试逻辑、茶不再误吸、Kimi 联网出真值、embedding 429 退避均验证通过。
+- **预防**：子串互含匹配对单字查询必须加护栏（歧义几何级放大）；**厂商私有参数（enable_search 等）沉默忽略 = 假功能**，接入时必须有真实端点的端到端断言；识别类调用一律 temperature=0。
+
+## BUG-020 确认入账 500：RENAME 迁移把外键引用改写成了已删除的 _old 表
+
+- **日期**：2026-08-21
+- **环境**：本机 dev（生产库同结构，同受影响——凡是经历过 brand 迁移的老库）
+- **现象**：热量待确认卡点「确认入账」500，日志 `sqlite3.OperationalError: no such table: main.food_nutrition_staging_old`（`approve_staging` 写认可时）。
+- **根因**：`_migrate_food_brand` 曾把 `food_nutrition_staging` 改名 `_old` 重建；SQLite 的 ALTER RENAME 会**自动改写其他表的外键引用**——`food_staging_approvals` 的 `staging_id` 外键被改成了指向 `food_nutrition_staging_old`。迁移收尾把 `_old` 删了，外键就此悬空；`get_conn` 开着 `PRAGMA foreign_keys=ON`，之后任何 approvals 写入都会去查这张不存在的表而报错。测试库全是新建（SCHEMA 直接建对表，从不经历 RENAME），所以测试一直抓不到。
+- **修复**：`database.py` 新增 `_migrate_staging_approvals_fk`（挂进 init_db）：检测 `food_staging_approvals` 建表 SQL 里的悬空 `_old` 引用，命中则按当前 SCHEMA 重建该表，搬回 staging 行仍在的存量记录后删旧表。
+- **验证**：新增 `test_migrate_staging_approvals_fk_repair`（造悬空引用遗迹 → 迁移 → 写入正常 + 存量保留）；并用**真实出问题的本地库副本**验证：修复后建表 SQL 引用归正、写入不再报错。pytest 226/226，smoke 62 断言。
+- **预防**：**含外键的表做 RENAME 迁移时，必须检查其他表指向它的 REFERENCES 会被一并改写**——迁移脚本跑完后 `SELECT sql FROM sqlite_master LIKE '%_old%'` 自查一遍；老库独有的故障只能靠「复制真实老库跑迁移」来验证，全新测试库永远发现不了。

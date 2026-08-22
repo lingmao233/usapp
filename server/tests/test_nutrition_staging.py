@@ -20,6 +20,7 @@ sys.path.insert(0, SERVER_DIR)
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
+import fakes  # noqa: E402
 from app import ai  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.db.database import encode_embedding, get_conn, init_db  # noqa: E402
@@ -60,10 +61,11 @@ def _new_user(client: TestClient, name: str = "共建测试圈") -> str:
 
 
 def _image_url() -> str:
-    """造一张站内存量的假图（识别路由只校验文件存在，不解析内容）。"""
+    """造一张站内存量的假图（识别路由只校验文件存在，不解析内容）。
+    每次内容唯一：图片型 RAG 按字节哈希取向量，相同字节会被当成同一张图命中历史。"""
     settings.upload_dir.mkdir(parents=True, exist_ok=True)
     stem = uuid.uuid4().hex
-    (settings.upload_dir / f"{stem}.jpg").write_bytes(b"\xff\xd8\xff\xd9")
+    (settings.upload_dir / f"{stem}.jpg").write_bytes(b"\xff\xd8\xff\xd9" + uuid.uuid4().bytes)
     return f"/api/uploads/{stem}.jpg"
 
 
@@ -81,8 +83,8 @@ def _web(kcal: float):
 # ---------- ai.web_search_food：开关与降级 ----------
 
 def test_web_search_food_off_by_default() -> None:
-    """LLM_WEB_SEARCH 默认 off：返回 None（不联网降级），存量行为不变。"""
-    assert settings.LLM_WEB_SEARCH == "off"
+    """LLM_WEB_SEARCH 非 on（默认 off/空串等效）：返回 None（不联网降级），存量行为不变。"""
+    assert settings.web_search_enabled is False
     assert ai.web_search_food("米饭") is None
 
 
@@ -96,6 +98,26 @@ def test_web_search_food_fake_stub(monkeypatch) -> None:
         "cho_per_100g": 30.0,
     }
     assert ai.web_search_food("  ") is None
+
+
+def test_web_search_food_kimi_channel(monkeypatch) -> None:
+    """树洞配置是 Kimi 系时，联网查询走 $web_search 回声协议（真联网）；
+    阿里 enable_search 写法在 Kimi 端点会被忽略（假联网），所以必须分流。"""
+    monkeypatch.setattr(settings, "LLM_WEB_SEARCH", "on")
+    monkeypatch.setattr(settings, "TREEHOLE_API_KEY", "test-key")
+    captured: dict = {}
+
+    def fake_cm(messages, cfg=None, tools=None, timeout=120.0, max_tool_rounds=3):
+        captured.update(cfg=cfg, tools=tools)
+        return '{"kcal_per_100g": 45.0, "protein_per_100g": null}'
+
+    monkeypatch.setattr(ai.llm, "chat_messages", fake_cm)
+    monkeypatch.setattr(ai, "web_search_food", fakes.REAL_IMPLS["web_search_food"])  # 脱桩走真身
+    out = ai.web_search_food("乌龙茶")
+    assert out is not None and out["kcal_per_100g"] == 45.0
+    assert captured["tools"] == [{"type": "builtin_function", "function": {"name": "$web_search"}}]
+    # TREEHOLE_BASE_URL 空 → Kimi 默认值
+    assert captured["cfg"] == ("test-key", "https://api.moonshot.cn/v1", "kimi-k2.6")
 
 
 # ---------- 手动添加：入 staging + 异步联网核验 ----------
@@ -170,6 +192,43 @@ def test_add_food_validation(env) -> None:
         "account_id": "不存在的账号", "name": "共建X", "kcal_per_100g": 100}).status_code == 404
 
 
+def test_migrate_staging_approvals_fk_repair(env) -> None:
+    """悬空外键修复（BUG-020）：模拟被 RENAME 改写引用的老库 → 迁移重建后
+    认可写入不再报 no such table，存量行搬回。"""
+    from app.db import database as db
+    conn = get_conn()
+    conn.commit()  # 先落干净，PRAGMA foreign_keys 在事务里不生效
+    conn.execute("PRAGMA foreign_keys=OFF")  # 造遗迹要绕开 FK（悬空引用写不进去）
+    conn.execute("DROP TABLE food_staging_approvals")
+    conn.execute("""CREATE TABLE food_staging_approvals (
+        staging_id INTEGER NOT NULL REFERENCES "food_nutrition_staging_old"(id),
+        account_id TEXT NOT NULL, created_at TEXT NOT NULL,
+        PRIMARY KEY (staging_id, account_id))""")
+    conn.execute(
+        "INSERT INTO food_nutrition_staging (name, kcal_per_100g, source, verified, approvals, created_at)"
+        " VALUES ('修复测试食品', 100, 'web', 1, 0, '2026-01-01')")
+    sid = conn.execute(
+        "SELECT id FROM food_nutrition_staging WHERE name = '修复测试食品'").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO food_staging_approvals (staging_id, account_id, created_at)"
+        " VALUES (?, 'acc-x', '2026-01-01')", (sid,))
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.commit()
+
+    db._migrate_staging_approvals_fk()
+
+    n = conn.execute(
+        "SELECT COUNT(*) AS c FROM food_staging_approvals WHERE staging_id = ?", (sid,)
+    ).fetchone()["c"]
+    assert n == 1  # 存量行搬回
+    # 修复后写入正常（修复前报 no such table: main.food_nutrition_staging_old）
+    conn.execute(
+        "INSERT OR IGNORE INTO food_staging_approvals (staging_id, account_id, created_at)"
+        " VALUES (?, 'acc-y', '2026-01-02')", (sid,))
+    conn.commit()
+
+
 # ---------- 查表未命中 → 联网搜 → staging ----------
 
 def _patch_recognize(monkeypatch, name: str, grams: float, model_kcal: float) -> None:
@@ -180,20 +239,28 @@ def _patch_recognize(monkeypatch, name: str, grams: float, model_kcal: float) ->
 
 
 def test_recognize_web_hit_writes_staging(env, monkeypatch) -> None:
-    """查表未命中 + 联网搜到：kcal=搜出值×克数，item 标 web_pending 带 staging_id，
-    食物写入 staging（source=web, verified=1, approvals=0）。"""
+    """联网兜底已移出热路径（5s 目标）：查表未命中 → 本次按模型估值标 model 立即返回；
+    响应后后台任务联网入库（TestClient 内联执行）——与用户是否确认入账解耦，
+    估值被丢弃也不影响入库；下次识别同食物直接命中 staging。"""
     uid = _new_user(env)
     _patch_recognize(monkeypatch, "共建神秘果", 150, 999)
     monkeypatch.setattr(ai, "web_search_food", lambda name, brand="": _web(120.0))
     r = env.post("/api/calories/recognize", json={"account_id": uid, "image_url": _image_url()})
     assert r.status_code == 200, r.text
     item = r.json()["entry"]["items"][0]
+    assert item == {"name": "共建神秘果", "kcal": 999, "source": "model", "grams": 150}
+    # 后台已把联网值写入 staging（本条 pending 从未确认也已在库）
     row = _staging_row("共建神秘果")
     assert row is not None
-    assert item == {"name": "共建神秘果", "kcal": 180, "source": "web_pending",
-                    "staging_id": row["id"], "grams": 150, "kcal_per_100g": 120.0}
     assert row["source"] == "web" and row["verified"] == 1 and row["approvals"] == 0
+    assert row["kcal_per_100g"] == 120.0
     assert row["protein_per_100g"] == 1.0 and row["fat_per_100g"] is None
+
+    # 下次识别：staging LIKE 命中，单价来自联网入库值（不再联网）
+    r = env.post("/api/calories/recognize", json={"account_id": uid, "image_url": _image_url()})
+    item2 = r.json()["entry"]["items"][0]
+    assert item2["source"] == "staging" and item2["kcal"] == 180  # 120 × 150g
+    assert item2["kcal_per_100g"] == 120.0
 
 
 def test_recognize_web_miss_falls_back_to_model(env, monkeypatch) -> None:

@@ -27,6 +27,16 @@ PROMOTE_APPROVALS = 3  # 晋升正式表所需的不同账号认可数
 VERIFY_TOLERANCE = 0.5  # 联网核验容差：与用户值差 >50% 视为离谱（保持待核实）
 MAX_KCAL_PER_100G = 1000.0  # 每 100g 热量物理上限（与导入清洗口径一致）
 
+# 做法词降级：识别名带做法（炒鸡蛋/红烧肉）全名查不到时，剥掉做法词再匹配通称行（→鸡蛋/肉）。
+# 只在词首剥；卤/酱/拌这类品类字不在名单里（「卤蛋」绝不能剥成「蛋」）
+_COOKING_PREFIX_RE = re.compile(
+    r"^(?:红烧|清炒|白灼|凉拌|爆炒|油焖|糖醋|干煸|香煎|油煎|水煮|清蒸|炭烤|干锅|铁板"
+    r"|炒|煎|炸|蒸|煮|炖|烤|烩|焖)"
+)
+# 高油做法：查询带这些做法时，不接受不含做法信息的通称行（炒鸡蛋≠煮鸡蛋，热量差一截），
+# 让给降级/联网拿做法级单价
+_OILY_COOKING_RE = re.compile(r"红烧|糖醋|油焖|干煸|香煎|油煎|炭烤|干锅|铁板|炒|煎|炸")
+
 # 括号备注（肥瘦/品牌/别名/罐头做法等）与空白在匹配时一律忽略
 _BRACKET_RE = re.compile(r"[（(\[][^（）()\[\]]*[)）\]]")
 _WS_RE = re.compile(r"\s+")
@@ -65,10 +75,13 @@ def _brand_groups(rows, brand: str):
 
 
 def _like_rows(rows, name: str):
-    """在一组行里做归一子串互含匹配：完全一致优先于互含；并列取原名最短（备注最少）。"""
+    """在一组行里做归一子串互含匹配：完全一致优先于互含；并列取原名最短（备注最少）。
+    单字查询不做「q in n」扩展（护栏：否则「茶」会吸到「茶肠」，零热量饮料变肉肠）。
+    查询带高油做法（炒鸡蛋）时，原名含同类做法信息的行优先（煎荷包蛋→荷包蛋(油煎)）。"""
     q = normalize(name)
     if not q:
         return None
+    q_oily = _OILY_COOKING_RE.search(q)
     best = None
     for r in rows:
         n = normalize(r["name"])
@@ -76,11 +89,13 @@ def _like_rows(rows, name: str):
             continue
         if q == n:
             rank, ratio = 0, 1.0
-        elif q in n or n in q:
+        elif len(q) >= 2 and (q in n or n in q):
             rank, ratio = 1, min(len(q), len(n)) / max(len(q), len(n))
         else:
             continue
-        key = (rank, -ratio, len(r["name"]), r["name"], r["id"])
+        # 做法偏好：查询带高油做法而候选行原名（含括号备注）没有做法信息 → 罚一档
+        cook_penalty = 1 if (q_oily and not _OILY_COOKING_RE.search(r["name"])) else 0
+        key = (rank, cook_penalty, -ratio, len(r["name"]), r["name"], r["id"])
         if best is None or key < best[0]:
             best = (key, r)
     return best[1] if best else None
@@ -125,12 +140,35 @@ def match(name: str, brand: str = "") -> dict | None:
 
     命中字典带 source：table=正式成分表；staging=预数据库（不确定真假，UI 标「待核实」，
     另带 staging_id 供确认入账时计认可）。brand 为空时按通用款匹配。
+    高油做法守卫：查询带炒/煎/炸/红烧等高油做法而命中行原名无做法信息 → 视为未命中，
+    让给降级/联网拿做法级单价（炒鸡蛋绝不按煮鸡蛋计价）。
     """
-    return (
-        _like_match(name, brand)
-        or _vector_match(name, brand)
-        or _staging_match(name, brand)
-    )
+    hit = _like_match(name, brand) or _vector_match(name, brand)
+    if hit is not None and _oily_mismatch(name, hit["name"]):
+        hit = None
+    if hit is None:
+        hit = _cooking_fallback(name, brand)
+        if hit is not None and _oily_mismatch(name, hit["name"]):
+            hit = None
+    return hit or _staging_match(name, brand)
+
+
+def _oily_mismatch(query: str, hit_name: str) -> bool:
+    """高油做法守卫：查询（归一后）含高油做法，而命中行原名（含括号备注）不含做法信息。"""
+    return bool(_OILY_COOKING_RE.search(normalize(query))) and not _OILY_COOKING_RE.search(hit_name)
+
+
+def _cooking_fallback(name: str, brand: str = "") -> dict | None:
+    """做法降级：识别名带做法词（炒鸡蛋/红烧肉）全名查不到时，剥词首做法再 LIKE 通称行
+    （炒鸡蛋→鸡蛋）。剥完与原名相同或不足两字则不动。"""
+    q = normalize(name)
+    stripped = _COOKING_PREFIX_RE.sub("", q)
+    if not stripped or stripped == q or len(stripped) < 2:
+        return None
+    hit = _like_match(stripped, brand)
+    if hit is not None:
+        hit["via"] = "cooking_fallback"  # 可观测：标明是剥了做法才命中的
+    return hit
 
 
 # ---------- 用户共建信任管线（staging 预数据库） ----------
@@ -184,7 +222,8 @@ def _check_staging_values(name: str, kcal_per_100g, macros: tuple, brand: str = 
     return name, brand, kcal, out
 
 
-def _staging_id_by_name(conn, name: str, brand: str = "") -> int | None:
+def staging_id_by_name(conn, name: str, brand: str = "") -> int | None:
+    """按（名，品牌）查 staging 行 id；不存在返回 None。"""
     row = conn.execute(
         "SELECT id FROM food_nutrition_staging WHERE name = ? AND brand = ?", (name, brand)
     ).fetchone()
@@ -208,7 +247,7 @@ def upsert_staging_web(name: str, web: dict, brand: str = "") -> int:
          datetime.now().isoformat(timespec="seconds")),
     )
     conn.commit()
-    return _staging_id_by_name(conn, name, brand)
+    return staging_id_by_name(conn, name, brand)
 
 
 def add_staging_food(
@@ -229,7 +268,7 @@ def add_staging_food(
     name, brand, kcal, macros = _check_staging_values(
         name, kcal_per_100g, (protein_per_100g, fat_per_100g, cho_per_100g), brand
     )
-    existing = _staging_id_by_name(conn, name, brand)
+    existing = staging_id_by_name(conn, name, brand)
     if existing is not None:
         row = conn.execute(
             "SELECT * FROM food_nutrition_staging WHERE id = ?", (existing,)

@@ -7,6 +7,7 @@
   没超什么都不发生（已有条目一律不动）
 """
 import json
+import logging
 import re
 import uuid
 from datetime import date, datetime
@@ -17,7 +18,11 @@ from fastapi import HTTPException
 from .. import ai
 from ..ai.prompts import EXPENSE_CATEGORIES
 from ..config import settings
-from ..db.database import get_conn
+from ..db.database import cosine, decode_embedding, encode_embedding, get_conn
+
+logger = logging.getLogger("us.ledger")
+
+IMAGE_RAG_THRESHOLD = 0.9  # 以图搜图命中阈值（实测：同图 ≈0.999，不同食物 ≈0.42，食物vs人像 ≈0.23）
 from . import nutrition, rules, selfshare
 
 MAX_AMOUNT_FEN = 10**12  # 金额 sanity 上限（分，约百亿）
@@ -33,14 +38,16 @@ def _require_account(conn, account_id: str) -> None:
 
 
 def _image_path(image_url: str) -> Path:
-    """image_url → 本地文件路径（照抄 fragments.read_display_image：优先 {uuid}_d.jpg 展示图副本）。"""
+    """image_url → 本地文件路径：识别优先用 800px 识别副本（{uuid}_s.jpg，更快），
+    其次 1600px 展示图（_d.jpg），最后原图。"""
     if not (image_url or "").startswith("/api/uploads/"):
         raise HTTPException(status_code=400, detail="image_url 只能是本站上传地址")
     base = image_url.rsplit("/", 1)[-1]
     stem = base.rsplit(".", 1)[0]
+    small = settings.upload_dir / f"{stem}_s.jpg"
     display = settings.upload_dir / f"{stem}_d.jpg"
     original = settings.upload_dir / base
-    path = display if display.is_file() else original
+    path = small if small.is_file() else (display if display.is_file() else original)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="图片不存在")
     return path
@@ -316,17 +323,24 @@ def recognize_calorie(account_id: str, image_url: str, hint: str = "") -> dict:
     conn = get_conn()
     _require_account(conn, account_id)
     # 用户历史克数纠正 → 注入识别 prompt 做校准（越估越准的来源）
-    result = ai.recognize_food(str(_image_path(image_url)), hint or "",
-                               calibration=_gram_corrections(conn, account_id))
+    try:
+        result = ai.recognize_food(str(_image_path(image_url)), hint or "",
+                                   calibration=_gram_corrections(conn, account_id))
+    except RuntimeError as exc:
+        # 视觉调用失败（参数被厂商拒/网络等）：如实 502，别谎报成"未配置"
+        raise HTTPException(status_code=502, detail="视觉模型调用失败，请稍后重试或手动录入") from exc
     if result is None:
         raise HTTPException(status_code=400, detail="未配置视觉模型，请手动录入")
     items = []
-    for raw in result.get("items") or []:
-        if not isinstance(raw, dict):
-            continue
+    missed: list[tuple[str, str]] = []  # 本地全不中的菜名：后台联网入库用
+    # 图片型 RAG：单菜品照片先以图搜图——命中历史确认过的图就直接复用上次的菜名/品牌/单价
+    raw_items = [r for r in (result.get("items") or []) if isinstance(r, dict)]
+    rag_hit = _image_rag_recall(conn, account_id, image_url) if len(raw_items) == 1 else None
+    for raw in raw_items:
         name = str(raw.get("name") or "").strip()[:50]
         if not name:
             continue
+        name = _apply_name_correction(conn, account_id, name)  # 用户纠正过的名字直接用纠正名
         brand = str(raw.get("brand") or "").strip()[:30]
         try:
             grams = float(raw.get("grams"))
@@ -336,20 +350,29 @@ def recognize_calorie(account_id: str, image_url: str, hint: str = "") -> dict:
             model_kcal = float(raw.get("kcal"))
         except (TypeError, ValueError):
             model_kcal = 0.0
-        hit = nutrition.match(name, brand) if grams > 0 else None
-        kcal = round(hit["kcal_per_100g"] * grams / 100) if hit else 0
-        source = hit["source"] if hit else ""  # table / staging
-        staging_id = hit.get("staging_id") if hit else None
-        kcal_per_100g = hit["kcal_per_100g"] if hit else None
+        if rag_hit and rag_hit.get("kcal_per_100g") and grams > 0:
+            # 以图搜图命中：菜名/品牌/单价全部复用历史确认值（同物同价，识别抖动归零）
+            name = rag_hit["name"]
+            brand = rag_hit["brand"] or brand
+            hit = None
+            kcal = round(float(rag_hit["kcal_per_100g"]) * grams / 100)
+            source = "image_rag"
+            staging_id = None
+            kcal_per_100g = float(rag_hit["kcal_per_100g"])
+        else:
+            hit = nutrition.match(name, brand) if grams > 0 else None
+            kcal = round(hit["kcal_per_100g"] * grams / 100) if hit else 0
+            source = hit["source"] if hit else ""  # table / staging
+            staging_id = hit.get("staging_id") if hit else None
+            kcal_per_100g = hit["kcal_per_100g"] if hit else None
         if kcal <= 0 and grams > 0:
-            # 查表（含 staging）未命中 → 联网搜（品牌参与查询，搜到按品牌款入 staging）
-            web = ai.web_search_food(name, brand)
-            if web is not None:
-                staging_id = nutrition.upsert_staging_web(name, web, brand)
-                kcal = round(float(web["kcal_per_100g"]) * grams / 100)
-                kcal_per_100g = float(web["kcal_per_100g"])
-                source = "web_pending"
+            # 查表（含 staging）未命中 → 联网兜底移出热路径（新品首次按模型估值标 model），
+            # 菜名收集起来由后台任务联网入库——与用户是否确认入账解耦，下次识别直接命中
+            missed.append((name, brand))
         if kcal <= 0 and model_kcal > 0:  # 全不中回退模型估值
+            # 物理上限钳制：隐含单价超 1000 kcal/100g（纯油 ~900）必是估飞了，钳回上限
+            if grams > 0 and model_kcal * 100 / grams > nutrition.MAX_KCAL_PER_100G:
+                model_kcal = nutrition.MAX_KCAL_PER_100G * grams / 100
             kcal, source, staging_id, kcal_per_100g = round(model_kcal), "model", None, None
         if kcal <= 0:
             continue
@@ -385,7 +408,29 @@ def recognize_calorie(account_id: str, image_url: str, hint: str = "") -> dict:
     )
     conn.commit()
     row = conn.execute("SELECT * FROM calorie_entries WHERE id = ?", (entry_id,)).fetchone()
-    return {"entry": _calorie_dict(row)}
+    return {"entry": _calorie_dict(row), "missed": missed}
+
+
+def backfill_food_web(missed: list[tuple[str, str]]) -> None:
+    """识别热路径未命中的菜名：后台联网查询并写入共建库（与用户是否确认入账解耦；
+    即使估值被丢弃也会入库）。下次识别同食物直接命中 staging，不再等待。
+
+    并发 3 路（每个菜名一次联网调用实测约 20-25s，串行太慢）；每个菜名经任务层
+    run_task 执行（失败重试 2 次、指数退坡、落库状态可查）。
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from . import tasks
+
+    def _one(name: str, brand: str) -> None:
+        def _run() -> None:
+            web = ai.web_search_food(name, brand)
+            if web is not None:
+                nutrition.upsert_staging_web(name, web, brand)
+        tasks.run_task("food_web_backfill", name, _run, retries=2)
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        list(pool.map(lambda nb: _one(*nb), missed))
 
 
 def _calorie_linkage(conn, account_id: str) -> dict | None:
@@ -433,6 +478,71 @@ def _calorie_linkage(conn, account_id: str) -> dict | None:
     }
 
 
+def _image_rag_recall(conn, account_id: str, image_url: str) -> dict | None:
+    """以图搜图（图片型 RAG）：当前识别图与这个账号历史确认图的图片向量做余弦，
+    top1 ≥ IMAGE_RAG_THRESHOLD 才命中，返回历史确认的菜名/品牌/单价。
+    账号级隔离（隐私铁律）；无历史/失败一律 None 走常管线。"""
+    has_rows = conn.execute(
+        "SELECT 1 FROM calorie_food_images WHERE account_id = ? AND embedding IS NOT NULL LIMIT 1",
+        (account_id,),
+    ).fetchone()
+    if not has_rows:
+        return None
+    try:
+        vec = ai.embed_food_image(_image_path(image_url).read_bytes(), "jpeg")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("图片向量化失败，跳过以图搜图：%s", exc)
+        return None
+    rows = conn.execute(
+        "SELECT name, brand, kcal_per_100g, typical_grams, embedding FROM calorie_food_images"
+        " WHERE account_id = ? AND embedding IS NOT NULL",
+        (account_id,),
+    ).fetchall()
+    best, best_sim = None, 0.0
+    for r in rows:
+        emb = decode_embedding(r["embedding"])
+        if emb is None:
+            continue
+        sim = cosine(vec, emb)
+        if sim > best_sim:
+            best, best_sim = r, sim
+    if best is not None and best_sim >= IMAGE_RAG_THRESHOLD:
+        return {"name": best["name"], "brand": best["brand"],
+                "kcal_per_100g": best["kcal_per_100g"],
+                "typical_grams": best["typical_grams"], "similarity": round(best_sim, 3)}
+    return None
+
+
+def _food_image_store(conn, row) -> None:
+    """确认入账后把识别图向量化入库（图片型 RAG）：仅单菜品 + 有图的记录。
+    失败只记日志，不影响入账。"""
+    try:
+        items = json.loads(row["items"] or "[]")
+        if not row["image_url"] or len(items) != 1:
+            return
+        it = items[0]
+        name = str(it.get("name") or "").strip()
+        if not name:
+            return
+        g = float(it.get("grams") or 0)
+        per100 = it.get("kcal_per_100g")
+        if per100 is None and g > 0 and float(it.get("kcal") or 0) > 0:
+            per100 = round(float(it["kcal"]) * 100 / g, 1)  # 模型估值项按确认值折算单价
+        vec = ai.embed_food_image(_image_path(row["image_url"]).read_bytes(), "jpeg")
+        conn.execute(
+            """INSERT INTO calorie_food_images
+               (id, account_id, name, brand, kcal_per_100g, typical_grams, image_url,
+                embedding, entry_id, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (uuid.uuid4().hex[:12], row["account_id"], name,
+             str(it.get("brand") or "")[:30], per100, g or None, row["image_url"],
+             encode_embedding(vec), row["id"], _now()),
+        )
+        conn.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("食物图片向量入库失败（不影响入账）：%s", exc)
+
+
 def _gram_corrections(conn, account_id: str, limit: int = 8) -> list[dict]:
     """该账号最近的克数纠正（同名取最新），注入识别 prompt 做校准样例。"""
     rows = conn.execute(
@@ -453,12 +563,46 @@ def _gram_corrections(conn, account_id: str, limit: int = 8) -> list[dict]:
     return out
 
 
-def update_calorie_item(entry_id: str, account_id: str, index: int, grams) -> dict:
-    """改某菜品的克数：kcal 按 kcal_per_100g 重算（无则按旧值线性缩放），
-    total_kcal / 运动等效同步；已入账的重触发超预算联动。
+def _apply_name_correction(conn, account_id: str, name: str) -> str:
+    """识别出的菜名先过一遍该账号的名字纠正表：有纠正记录就用纠正名（最新一条生效）。"""
+    row = conn.execute(
+        """SELECT corrected_name FROM calorie_name_corrections
+           WHERE account_id = ? AND recognized_name = ? ORDER BY rowid DESC LIMIT 1""",
+        (account_id, name),
+    ).fetchone()
+    return row["corrected_name"] if row else name
 
-    克数与识别原值不同时记一条纠正（calorie_gram_corrections），
-    后续识别同类食物时作为校准样例注入 prompt（越改越准）。
+
+def lookup_food(account_id: str, name: str, grams=None) -> dict:
+    """手动录入的即时匹配（只读不写库）：正式表/共建库命中返回单价；给了克数顺带算好热量。"""
+    conn = get_conn()
+    _require_account(conn, account_id)
+    name = str(name or "").strip()[:50]
+    if not name:
+        raise HTTPException(status_code=400, detail="食物名不能为空")
+    hit = nutrition.match(name)
+    if hit is None:
+        return {"found": False}
+    out = {"found": True, "name": hit["name"], "kcal_per_100g": hit["kcal_per_100g"],
+           "source": hit["source"]}
+    try:
+        g = float(grams)
+    except (TypeError, ValueError):
+        g = 0.0
+    if g > 0:
+        out["grams"] = g
+        out["kcal"] = round(float(hit["kcal_per_100g"]) * g / 100)
+    return out
+
+
+def update_calorie_item(entry_id: str, account_id: str, index: int,
+                        grams=None, name: str | None = None) -> dict:
+    """改某菜品：克数和/或名字（至少改一样）。
+
+    克数：按 kcal_per_100g 重算（无则按旧值线性缩放）；与原估值不同记一条克数纠正。
+    名字：记名字纠正（识别名→纠正名，下次识别直接生效），再重走匹配链——查表/共建库命中
+    按新单价×克数重算；不中且联网开时联网搜、搜到写入 staging（标 web_pending）；全不中
+    保留当前热量标 model 估值。total/运动等效同步；已入账重触发超预算联动。
     """
     conn = get_conn()
     row = conn.execute("SELECT * FROM calorie_entries WHERE id = ?", (entry_id,)).fetchone()
@@ -469,35 +613,87 @@ def update_calorie_item(entry_id: str, account_id: str, index: int, grams) -> di
     items = json.loads(row["items"] or "[]")
     if not isinstance(index, int) or isinstance(index, bool) or not (0 <= index < len(items)):
         raise HTTPException(status_code=400, detail="菜品序号不对")
-    try:
-        grams = float(grams)
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="克数必须是数字")
-    if not (0 < grams <= 5000):
-        raise HTTPException(status_code=400, detail="克数要在 1-5000 之间")
     item = items[index]
-    old_grams = float(item.get("grams") or 0)
-    old_kcal = float(item.get("kcal") or 0)
-    if old_grams <= 0:
-        raise HTTPException(status_code=400, detail="这个菜品没有克数可改")
-    if item.get("kcal_per_100g"):
-        new_kcal = round(float(item["kcal_per_100g"]) * grams / 100)
-    else:  # 模型估值没有单价：按旧值线性缩放
-        new_kcal = round(old_kcal * grams / old_grams)
-    if new_kcal <= 0:
-        raise HTTPException(status_code=400, detail="改完热量不对，检查一下克数")
+    changed = False
 
-    # 与原估值不同才记纠正（幂等：同值反复保存不灌水）
-    if round(grams) != round(old_grams):
-        conn.execute(
-            """INSERT INTO calorie_gram_corrections
-               (id, account_id, name, brand, ai_grams, user_grams, entry_id, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (uuid.uuid4().hex[:12], account_id, str(item.get("name") or "")[:50],
-             str(item.get("brand") or "")[:30], old_grams, grams, entry_id, _now()),
-        )
-    item["grams"] = round(grams)
-    item["kcal"] = new_kcal
+    # ---- 改名字/重匹配：名字变了记纠正；重走匹配链（同名也走——「联网数据已入库，
+    # 点可更新」的升级动作就是同名重匹配） ----
+    if name is not None:
+        new_name = str(name or "").strip()[:50]
+        if not new_name:
+            raise HTTPException(status_code=400, detail="菜名不能为空")
+        renamed = new_name != item.get("name")
+        if renamed:
+            conn.execute(
+                """INSERT INTO calorie_name_corrections
+                   (id, account_id, recognized_name, corrected_name, entry_id, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (uuid.uuid4().hex[:12], account_id, str(item.get("name") or "")[:50],
+                 new_name, entry_id, _now()),
+            )
+        brand = str(item.get("brand") or "")
+        g0 = float(item.get("grams") or 0)
+        hit = nutrition.match(new_name, brand)
+        web = ai.web_search_food(new_name, brand) if hit is None and g0 > 0 else None
+        if hit is not None or web is not None:
+            # 查表/共建库命中，或联网搜到（写入 staging 标待认可）：按新单价×克数重算
+            per100 = float(hit["kcal_per_100g"]) if hit is not None else float(web["kcal_per_100g"])
+            if hit is not None:
+                item["source"] = hit["source"]
+                if hit.get("staging_id") is not None:
+                    item["staging_id"] = hit["staging_id"]
+                else:
+                    item.pop("staging_id", None)
+            else:
+                item["source"] = "web_pending"
+                item["staging_id"] = nutrition.upsert_staging_web(new_name, web, brand)
+            item["kcal_per_100g"] = per100
+            if g0 > 0:
+                item["kcal"] = round(per100 * g0 / 100)
+            item["name"] = new_name
+            changed = True
+        elif renamed:
+            # 改名且全不中：保留当前热量，标估值
+            item["source"] = "model"
+            item.pop("staging_id", None)
+            item.pop("kcal_per_100g", None)
+            item["name"] = new_name
+            changed = True
+
+    # ---- 改克数：按（可能刚更新的）单价重算 + 克数纠正 ----
+    if grams is not None:
+        try:
+            grams = float(grams)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="克数必须是数字")
+        if not (0 < grams <= 5000):
+            raise HTTPException(status_code=400, detail="克数要在 1-5000 之间")
+        old_grams = float(item.get("grams") or 0)
+        old_kcal = float(item.get("kcal") or 0)
+        if old_grams <= 0:
+            raise HTTPException(status_code=400, detail="这个菜品没有克数可改")
+        if item.get("kcal_per_100g"):
+            new_kcal = round(float(item["kcal_per_100g"]) * grams / 100)
+        else:  # 模型估值没有单价：按旧值线性缩放
+            new_kcal = round(old_kcal * grams / old_grams)
+        if new_kcal <= 0:
+            raise HTTPException(status_code=400, detail="改完热量不对，检查一下克数")
+        # 与原估值不同才记纠正（幂等：同值反复保存不灌水）
+        if round(grams) != round(old_grams):
+            conn.execute(
+                """INSERT INTO calorie_gram_corrections
+                   (id, account_id, name, brand, ai_grams, user_grams, entry_id, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (uuid.uuid4().hex[:12], account_id, str(item.get("name") or "")[:50],
+                 str(item.get("brand") or "")[:30], old_grams, grams, entry_id, _now()),
+            )
+        item["grams"] = round(grams)
+        item["kcal"] = new_kcal
+        changed = True
+
+    if not changed:
+        raise HTTPException(status_code=400, detail="没有改动")
+
     total = round(sum(float(i.get("kcal") or 0) for i in items), 1)
     equiv = rules.exercise_equivalents(total, _weight_kg(_weight_loss_goal(conn, account_id)))
     conn.execute(
@@ -511,18 +707,51 @@ def update_calorie_item(entry_id: str, account_id: str, index: int, grams) -> di
     return {"entry": _calorie_dict(updated), "adjustment": adjustment}
 
 
-def add_calorie(account_id: str, total_kcal: float | None, note: str = "") -> dict:
-    """手动录入热量（数字 + 备注）：直接 confirmed，触发超预算联动。"""
+def add_calorie(account_id: str, total_kcal: float | None, note: str = "",
+                items: list[dict] | None = None) -> dict:
+    """手动录入热量（数字 + 备注）：直接 confirmed，触发超预算联动。
+
+    items 为可选结构化明细（手动录入时按食物名查表命中后带上）：轻校验，
+    非法条目丢弃；有明细的记录之后也能逐项改克数/改名。
+    """
     conn = get_conn()
     _require_account(conn, account_id)
     kcal = _check_kcal(total_kcal)
+    clean: list[dict] = []
+    for raw in items or []:
+        if not isinstance(raw, dict):
+            continue
+        n = str(raw.get("name") or "").strip()[:50]
+        if not n:
+            continue
+        try:
+            ik = round(float(raw.get("kcal") or 0))
+        except (TypeError, ValueError):
+            continue
+        if ik <= 0:
+            continue
+        it: dict = {"name": n, "kcal": ik, "source": str(raw.get("source") or "manual")[:20]}
+        try:
+            g = float(raw.get("grams") or 0)
+            if g > 0:
+                it["grams"] = round(g)
+        except (TypeError, ValueError):
+            pass
+        try:
+            p = float(raw.get("kcal_per_100g") or 0)
+            if p > 0:
+                it["kcal_per_100g"] = p
+        except (TypeError, ValueError):
+            pass
+        clean.append(it)
     equiv = rules.exercise_equivalents(kcal, _weight_kg(_weight_loss_goal(conn, account_id)))
     entry_id = uuid.uuid4().hex[:12]
     conn.execute(
         """INSERT INTO calorie_entries (id, account_id, total_kcal, items, exercise_equiv, note,
            source, image_url, status, created_at)
-           VALUES (?, ?, ?, '[]', ?, ?, 'manual', '', 'confirmed', ?)""",
-        (entry_id, account_id, kcal, json.dumps(equiv, ensure_ascii=False), (note or "").strip()[:100], _now()),
+           VALUES (?, ?, ?, ?, ?, ?, 'manual', '', 'confirmed', ?)""",
+        (entry_id, account_id, kcal, json.dumps(clean, ensure_ascii=False),
+         json.dumps(equiv, ensure_ascii=False), (note or "").strip()[:100], _now()),
     )
     conn.commit()
     adjustment = _calorie_linkage(conn, account_id)
@@ -564,10 +793,70 @@ def confirm_calorie(
         conn.execute(f"UPDATE calorie_entries SET {', '.join(fields)} WHERE id = ?", values)
         conn.commit()
         for item in json.loads(row["items"] or "[]"):
-            if isinstance(item, dict) and item.get("source") in ("staging", "web_pending"):
-                nutrition.approve_staging(item.get("staging_id"), account_id)
+            if isinstance(item, dict) and item.get("source") in ("staging", "web_pending", "model"):
+                # 联网兜底已移出热路径（后台异步入库）：item 里没有 staging_id 时按名字反查补上
+                staging_id = item.get("staging_id") or nutrition.staging_id_by_name(
+                    conn, str(item.get("name") or ""), str(item.get("brand") or ""))
+                if staging_id is not None:
+                    nutrition.approve_staging(staging_id, account_id)
+        # 图片型 RAG：单菜品 + 有图的确认记录向量化入库（下次以图搜图直接复用菜名/品牌/单价）
+        _food_image_store(conn, conn.execute(
+            "SELECT * FROM calorie_entries WHERE id = ?", (entry_id,)).fetchone())
     adjustment = _calorie_linkage(conn, account_id)
     return {"id": entry_id, "status": "confirmed", "adjustment": adjustment}
+
+
+def delete_calorie(entry_id: str, account_id: str) -> dict:
+    """删除一条热量记录（仅本人；物理删除，预算联动随下一次入账自然重算）。"""
+    conn = get_conn()
+    _require_account(conn, account_id)
+    row = conn.execute("SELECT id, account_id FROM calorie_entries WHERE id = ?",
+                       (entry_id,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    if row["account_id"] != account_id:
+        raise HTTPException(status_code=403, detail="只能删自己的记录")
+    conn.execute("DELETE FROM calorie_entries WHERE id = ?", (entry_id,))
+    conn.commit()
+    return {"status": "deleted"}
+
+
+def list_corrections(account_id: str) -> dict:
+    """我的识别纠正记录（名字/克数两张表，纠正错了可删——删了下次识别不再生效）。"""
+    conn = get_conn()
+    _require_account(conn, account_id)
+    names = conn.execute(
+        """SELECT id, recognized_name, corrected_name, created_at
+           FROM calorie_name_corrections WHERE account_id = ? ORDER BY rowid DESC""",
+        (account_id,),
+    ).fetchall()
+    grams = conn.execute(
+        """SELECT id, name, ai_grams, user_grams, created_at
+           FROM calorie_gram_corrections WHERE account_id = ? ORDER BY rowid DESC""",
+        (account_id,),
+    ).fetchall()
+    return {
+        "names": [dict(r) for r in names],
+        "grams": [dict(r) for r in grams],
+    }
+
+
+def delete_correction(account_id: str, kind: str, correction_id: str) -> dict:
+    """删除一条识别纠正（kind=name/gram），仅本人。"""
+    if kind not in ("name", "gram"):
+        raise HTTPException(status_code=400, detail="kind 只能是 name/gram")
+    conn = get_conn()
+    _require_account(conn, account_id)
+    table = "calorie_name_corrections" if kind == "name" else "calorie_gram_corrections"
+    row = conn.execute(f"SELECT account_id FROM {table} WHERE id = ?",
+                       (correction_id,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="纠正记录不存在")
+    if row["account_id"] != account_id:
+        raise HTTPException(status_code=403, detail="只能删自己的纠正")
+    conn.execute(f"DELETE FROM {table} WHERE id = ?", (correction_id,))
+    conn.commit()
+    return {"status": "deleted"}
 
 
 def list_calories(account_id: str, day: str | None = None) -> dict:
@@ -587,6 +876,23 @@ def list_calories(account_id: str, day: str | None = None) -> dict:
         "items": [_calorie_dict(r) for r in rows],
         "consumed_kcal": round(sum(r["total_kcal"] for r in rows), 1),
     }
+    # 估值条目的升级提示：联网后台入库后，staging 有了同名行 → 挂 upgrade（用户自己决定是否更新）
+    for d in out["items"]:
+        for it in d["items"]:
+            if not isinstance(it, dict) or it.get("source") != "model" or not it.get("grams"):
+                continue
+            sid = nutrition.staging_id_by_name(conn, str(it.get("name") or ""),
+                                               str(it.get("brand") or ""))
+            if sid is None:
+                continue
+            srow = conn.execute(
+                "SELECT kcal_per_100g FROM food_nutrition_staging WHERE id = ?", (sid,)
+            ).fetchone()
+            if srow:
+                it["upgrade"] = {
+                    "kcal_per_100g": srow["kcal_per_100g"],
+                    "kcal": round(float(srow["kcal_per_100g"]) * float(it["grams"]) / 100),
+                }
     goal = _weight_loss_goal(conn, account_id)
     if goal:
         budget = json.loads(goal["framework"] or "{}").get("budget_kcal")

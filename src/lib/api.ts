@@ -27,7 +27,7 @@ const webStorage: StorageLike = {
 
 const request: RequestFn = async (path, opts) => {
   // 图片上传：{file, display?} 或裸 Blob 包成 multipart（浏览器自动带 boundary）；其余照常 JSON
-  const raw = opts?.body as { file?: Blob; display?: Blob } | Blob | undefined
+  const raw = opts?.body as { file?: Blob; display?: Blob; vision?: Blob } | Blob | undefined
   const isUpload =
     raw instanceof Blob || (typeof raw === "object" && raw !== null && raw.file instanceof Blob)
   let body: BodyInit | undefined
@@ -36,9 +36,10 @@ const request: RequestFn = async (path, opts) => {
     if (raw instanceof Blob) {
       form.append("file", raw, "image.jpg")
     } else {
-      const upload = raw as { file: Blob; display?: Blob }
+      const upload = raw as { file: Blob; display?: Blob; vision?: Blob }
       form.append("file", upload.file, "image.jpg")
       if (upload.display) form.append("display", upload.display, "display.jpg")
+      if (upload.vision) form.append("vision", upload.vision, "vision.jpg")
     }
     body = form
   } else if (opts?.body !== undefined) {

@@ -63,8 +63,9 @@ async def _parse_parts(request: Request) -> dict[str, tuple[str, bytes]]:
 
 @router.post("")
 async def upload_image(request: Request):
-    """双份存储（图片智能化）：file=原图（≤20MB 不压），可选 display=1600px 展示图（总是 jpg）。
-    原图存 {uuid}.{ext}，展示图存 {uuid}_d.jpg；image_url 只记原图，展示图 URL 按约定推导。"""
+    """双份/三份存储（图片智能化）：file=原图（≤20MB 不压），可选 display=1600px 展示图、
+    vision=800px 识别图（均为 jpg）。原图存 {uuid}.{ext}，副本按约定推导（_d/_s 后缀）；
+    image_url 只记原图。"""
     parts = await _parse_parts(request)
     if "file" not in parts:
         raise HTTPException(status_code=400, detail="请求里没有文件")
@@ -76,10 +77,13 @@ async def upload_image(request: Request):
         raise HTTPException(status_code=413, detail="图片不能超过 20MB")
     stem = uuid.uuid4().hex
     (upload_dir() / f"{stem}{ext}").write_bytes(payload)
-    # 展示图副本：只在确为 jpeg 时按约定落盘（异常副本宁可不要，前端 onError 会回退原图）
+    # 副本：只在确为 jpeg 时按约定落盘（异常副本宁可不要，前端 onError 会回退原图）
     display = parts.get("display")
     if display and display[0] == "image/jpeg" and 0 < len(display[1]) <= MAX_SIZE:
         (upload_dir() / f"{stem}_d.jpg").write_bytes(display[1])
+    vision = parts.get("vision")
+    if vision and vision[0] == "image/jpeg" and 0 < len(vision[1]) <= MAX_SIZE:
+        (upload_dir() / f"{stem}_s.jpg").write_bytes(vision[1])
     return {"url": f"/api/uploads/{stem}{ext}"}
 
 

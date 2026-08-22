@@ -73,10 +73,11 @@ def controlled_table():
 
 
 def _image_url() -> str:
-    """造一张站内存量的假图（识别路由只校验文件存在，不解析内容）。"""
+    """造一张站内存量的假图（识别路由只校验文件存在，不解析内容）。
+    每次内容唯一：图片型 RAG 按字节哈希取向量，相同字节会被当成同一张图命中历史。"""
     settings.upload_dir.mkdir(parents=True, exist_ok=True)
     stem = uuid.uuid4().hex
-    (settings.upload_dir / f"{stem}.jpg").write_bytes(b"\xff\xd8\xff\xd9")
+    (settings.upload_dir / f"{stem}.jpg").write_bytes(b"\xff\xd8\xff\xd9" + uuid.uuid4().bytes)
     return f"/api/uploads/{stem}.jpg"
 
 
@@ -212,6 +213,47 @@ def test_match_below_threshold_returns_none(controlled_table) -> None:
     controlled_table("番茄炒蛋", 90)
     assert nutrition.match("红烧狮子头") is None
     assert nutrition.match("") is None
+
+
+def test_match_like_single_char_no_containment(controlled_table) -> None:
+    """LIKE 短词护栏：单字查询不做「q in n」扩展——「茶」不得吸到「茶肠」
+    （零热量饮料变肉肠的生产事故）；单字完全一致仍命中，双字互含不受影响。"""
+    controlled_table("茶肠", 329)
+    controlled_table("茶", 2)
+    controlled_table("乌龙茶", 5)
+    assert nutrition.match("茶")["name"] == "茶"          # 单字只收完全一致
+    assert nutrition.match("乌龙茶")["name"] == "乌龙茶"   # 双字互含照旧
+    # 表里没有与「茶」同名的行时，单字互含不兜底（不能再返回茶肠）
+    conn = get_conn()
+    conn.execute("DELETE FROM food_nutrition WHERE name = '茶'")
+    conn.commit()
+    hit = nutrition.match("茶")
+    assert hit is None or hit["name"] != "茶肠"
+
+
+def test_match_cooking_method_fallback(controlled_table) -> None:
+    """做法降级：「炒鸡蛋」全名查不到时剥词首做法命中「鸡蛋」通称行（via=cooking_fallback）；
+    「卤」是品类字不剥（「卤蛋」绝不降成「蛋」）；无做法词不动。"""
+    controlled_table("鸡蛋(代表值)", 139)
+    controlled_table("卤蛋", 170)
+    fb = nutrition._cooking_fallback("炒鸡蛋")
+    assert fb is not None and fb["name"] == "鸡蛋(代表值)" and fb["via"] == "cooking_fallback"
+    assert nutrition._cooking_fallback("卤蛋") is None
+    assert nutrition._cooking_fallback("米饭") is None
+    # 非高油做法走降级链：卤蛋精确命中 170
+    assert nutrition.match("卤蛋")["name"] == "卤蛋"
+
+
+def test_match_oily_method_guard(controlled_table) -> None:
+    """高油做法守卫：「炒鸡蛋」命中无做法信息的通称行时视为未命中（让给联网/估值拿
+    做法级单价，炒鸡蛋绝不按煮鸡蛋计价）；并列候选优先含做法信息的行（煎荷包蛋→油煎行）。"""
+    controlled_table("鸡蛋(煮)", 143)
+    assert nutrition.match("炒鸡蛋") is None       # 通称行无做法信息 → 拒绝
+    assert nutrition.match("煮鸡蛋") is not None   # 非高油不受影响
+    controlled_table("荷包蛋(煮)", 155)
+    controlled_table("荷包蛋(油煎)", 195)
+    hit = nutrition.match("煎荷包蛋")
+    assert hit is not None and hit["name"] == "荷包蛋(油煎)" and hit["kcal_per_100g"] == 195
 
 
 # ---------- recognize_calorie：查表计算 + 模型兜底 ----------

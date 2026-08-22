@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, BackgroundTasks
 from pydantic import BaseModel
 
 from ..services import ledger as svc
@@ -75,39 +75,72 @@ class CalorieRecognizeIn(BaseModel):
 
 
 @calories_router.post("/recognize")
-def recognize_calorie(body: CalorieRecognizeIn):
-    """食物照片识别 → pending 条目（含运动等效）；未配视觉模型 400。"""
-    return svc.recognize_calorie(body.account_id, body.image_url, body.hint)
+def recognize_calorie(body: CalorieRecognizeIn, background_tasks: BackgroundTasks):
+    """食物照片识别 → pending 条目（含运动等效）；未配视觉模型 400。
+    查表未命中的菜名在响应后后台联网入库（不堵识别，与用户是否入账解耦）。"""
+    result = svc.recognize_calorie(body.account_id, body.image_url, body.hint)
+    missed = result.pop("missed", None) or []
+    if missed:
+        background_tasks.add_task(svc.backfill_food_web, missed)
+    return result
 
 
 class CalorieIn(BaseModel):
-    """确认（带 id，数字可改）/ 手动录入（不带 id）；确认都会触发超预算联动。"""
+    """确认（带 id，数字可改）/ 手动录入（不带 id）；确认都会触发超预算联动。
+    items 为手动录入的可选结构化明细（食物名+克数+热量，查表命中后由前端带上）。"""
 
     account_id: str
     id: str | None = None
     total_kcal: float | None = None
     note: str | None = None
+    items: list[dict] | None = None
 
 
 @calories_router.post("")
 def add_or_confirm_calorie(body: CalorieIn):
     if body.id:
         return svc.confirm_calorie(body.id, body.account_id, body.total_kcal, body.note)
-    return svc.add_calorie(body.account_id, body.total_kcal, body.note or "")
+    return svc.add_calorie(body.account_id, body.total_kcal, body.note or "", body.items)
+
+
+@calories_router.get("/lookup")
+def lookup_food(account_id: str, name: str, grams: float | None = None):
+    """手动录入即时匹配：查正式表/共建库返回每 100g 热量；给了克数顺带算好总热量。"""
+    return svc.lookup_food(account_id, name, grams)
 
 
 class CalorieItemIn(BaseModel):
-    """改某菜品的克数：index 为 items 下标；kcal 服务端按 kcal_per_100g 重算。"""
+    """改某菜品：index 为 items 下标；grams / name 至少给一个。
+    改名后服务端重走匹配链（查表→联网→保留估值）；kcal 按 kcal_per_100g 重算。"""
 
     account_id: str
     index: int
-    grams: float
+    grams: float | None = None
+    name: str | None = None
 
 
 @calories_router.put("/{entry_id}/items")
 def update_calorie_item(entry_id: str, body: CalorieItemIn):
-    """改克数（pending/已入账都可改）：返回更新后的整条记录与超预算联动结果。"""
-    return svc.update_calorie_item(entry_id, body.account_id, body.index, body.grams)
+    """改克数/改名（pending/已入账都可改）：返回更新后的整条记录与超预算联动结果。"""
+    return svc.update_calorie_item(entry_id, body.account_id, body.index, body.grams, body.name)
+
+
+@calories_router.delete("/{entry_id}")
+def delete_calorie(entry_id: str, account_id: str):
+    """删除一条热量记录（仅本人）。"""
+    return svc.delete_calorie(entry_id, account_id)
+
+
+@calories_router.get("/corrections")
+def list_corrections(account_id: str):
+    """我的识别纠正记录（名字/克数），纠正错了可删。"""
+    return svc.list_corrections(account_id)
+
+
+@calories_router.delete("/corrections/{kind}/{correction_id}")
+def delete_correction(kind: str, correction_id: str, account_id: str):
+    """删除一条识别纠正（kind=name/gram，仅本人）。"""
+    return svc.delete_correction(account_id, kind, correction_id)
 
 
 @calories_router.get("")

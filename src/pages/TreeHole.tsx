@@ -262,7 +262,7 @@ export default function TreeHole({ accountId }: { accountId: string }) {
     let imageUrl = ""
     if (img) {
       try {
-        imageUrl = (await api.uploadImage(img.original, img.display)).url
+        imageUrl = (await api.uploadImage(img.original, img.display, img.vision)).url
       } catch {
         setSendError("图片没传上去，再试一次")
         setSending(false)

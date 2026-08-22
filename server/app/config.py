@@ -32,12 +32,13 @@ class Settings:
     VISION_API_KEY: str = os.getenv("VISION_API_KEY", "") or LLM_API_KEY
     VISION_BASE_URL: str = os.getenv("VISION_BASE_URL", "") or LLM_BASE_URL
     VISION_MODEL: str = os.getenv("VISION_MODEL", "")
-    # 思考强度总开关（off/minimal/low/medium/high），空 = 不传参；深度思考类模型建议 minimal。
-    # "off" 映射为 enable_thinking=false（阿里系关思考写法），其余档走 reasoning_effort
+    # 思考强度总开关（on/off/minimal/low/medium/high 或 on:预算），空 = 不传参；推理类模型建议 minimal。
+    # on/off 映射为 enable_thinking=true/false（阿里系开关写法），on:N 附带 thinking_budget=N
+    # （阿里 Qwen3.x 原生强度），其余档走 reasoning_effort（豆包/OpenAI 系）
     VISION_REASONING: str = os.getenv("VISION_REASONING", "")
     # 分场景思考强度（空 = 回退 VISION_REASONING；再空 = 用各自的默认值）：
-    # 碎片 caption 要精准默认 high；热量识别只认菜名+估分量（热量查表算）默认 low；
-    # 记账只要准确 JSON，默认 minimal 抢速度
+    # 碎片 caption 求精准默认 high；热量快档默认 off（包装食品没读出品牌时自动带思考重试一次）；
+    # 记账求快默认 off
     VISION_REASONING_CAPTION: str = os.getenv("VISION_REASONING_CAPTION", "")
     VISION_REASONING_RECEIPT: str = os.getenv("VISION_REASONING_RECEIPT", "")
     VISION_REASONING_FOOD: str = os.getenv("VISION_REASONING_FOOD", "")
@@ -105,15 +106,15 @@ class Settings:
     def vision_reasoning(self, scene: str) -> str:
         """分场景思考强度：场景变量 → 总开关 VISION_REASONING → 场景默认值。
 
-        scene ∈ caption/receipt/food。caption 要精准默认 high，food 只识别+估分量
-        默认 low，receipt 抢速度默认 minimal。
+        scene ∈ caption/receipt/food。caption 求精准默认 high；food 快档默认 off
+        （包装食品未读出品牌时门面层自动带思考重试一次）；receipt 求快默认 off。
         """
         per_scene = {
             "caption": self.VISION_REASONING_CAPTION,
             "receipt": self.VISION_REASONING_RECEIPT,
             "food": self.VISION_REASONING_FOOD,
         }
-        defaults = {"caption": "high", "receipt": "minimal", "food": "low"}
+        defaults = {"caption": "high", "receipt": "off", "food": "off"}
         return per_scene.get(scene, "") or self.VISION_REASONING or defaults.get(scene, "")
 
     @property

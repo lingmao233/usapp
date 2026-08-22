@@ -111,8 +111,8 @@ def test_vision_caption_payload_shape(monkeypatch) -> None:
 
 
 def test_vision_reasoning_levels(monkeypatch) -> None:
-    """分场景思考强度：off → enable_thinking=false；其余档 → reasoning_effort；
-    场景变量 > 总开关 > 场景默认（caption=high，food=low，receipt=minimal）。"""
+    """分场景思考强度：on/off → enable_thinking=true/false；其余档 → reasoning_effort；
+    场景变量 > 总开关 > 场景默认（caption=high，food=off，receipt=off）。"""
     captured: dict = {}
 
     class Resp:
@@ -133,6 +133,16 @@ def test_vision_reasoning_levels(monkeypatch) -> None:
     assert captured["payload"]["enable_thinking"] is False
     assert "reasoning_effort" not in captured["payload"]
 
+    vision.vision_caption(JPEG_A, "jpeg", reasoning="on")
+    assert captured["payload"]["enable_thinking"] is True
+    assert "reasoning_effort" not in captured["payload"]
+
+    # 阿里 Qwen3.x 原生强度：on:预算 → enable_thinking=true + thinking_budget
+    vision.vision_caption(JPEG_A, "jpeg", reasoning="on:2000")
+    assert captured["payload"]["enable_thinking"] is True
+    assert captured["payload"]["thinking_budget"] == 2000
+    assert "reasoning_effort" not in captured["payload"]
+
     vision.vision_caption(JPEG_A, "jpeg", reasoning="high")
     assert captured["payload"]["reasoning_effort"] == "high"
     assert "enable_thinking" not in captured["payload"]
@@ -143,12 +153,43 @@ def test_vision_reasoning_levels(monkeypatch) -> None:
     # 场景默认值与覆盖优先级
     monkeypatch.setattr(settings, "VISION_REASONING", "")
     assert settings.vision_reasoning("caption") == "high"
-    assert settings.vision_reasoning("receipt") == "minimal"
-    assert settings.vision_reasoning("food") == "low"
+    assert settings.vision_reasoning("receipt") == "off"
+    assert settings.vision_reasoning("food") == "off"
     monkeypatch.setattr(settings, "VISION_REASONING", "low")
     assert settings.vision_reasoning("caption") == "low"  # 总开关压默认
     monkeypatch.setattr(settings, "VISION_REASONING_RECEIPT", "off")
     assert settings.vision_reasoning("receipt") == "off"  # 场景变量压总开关
+
+
+def test_recognize_food_two_level_retry(monkeypatch) -> None:
+    """两级策略：快档（food 默认 off）先出；模型自报包装食品但没读出品牌 →
+    带思考（on）重试一次；家常菜（packaged=False）不重试。"""
+    monkeypatch.setattr(settings, "VISION_MODEL", "m")
+    monkeypatch.setattr(settings, "VISION_API_KEY", "k")
+    monkeypatch.setattr(settings, "VISION_REASONING", "")
+    monkeypatch.setattr(settings, "VISION_REASONING_FOOD", "")
+    calls: list[str] = []
+
+    def fake_json(path, prompt, reasoning="", timeout=60.0):
+        calls.append(reasoning)
+        if len(calls) == 1:  # 第一遍：包装食品但品牌空
+            return {"items": [{"name": "火鸡面", "brand": "", "grams": 100,
+                               "kcal": 470, "packaged": True}]}
+        return {"items": [{"name": "火鸡面", "brand": "三养", "grams": 100,
+                           "kcal": 470, "packaged": True}]}
+
+    monkeypatch.setattr(vision, "vision_json", fake_json)
+    out = ai.recognize_food("/tmp/x.jpg")
+    assert calls == ["off", "on"]  # 快档先出，包装无品牌触发思考重试
+    assert out["items"][0]["brand"] == "三养"  # 用重试结果
+
+    calls.clear()
+    monkeypatch.setattr(vision, "vision_json", lambda path, prompt, reasoning="", timeout=60.0: (
+        calls.append(reasoning) or
+        {"items": [{"name": "红烧肉", "brand": "", "grams": 200, "kcal": 500, "packaged": False}]}
+    ))
+    ai.recognize_food("/tmp/x.jpg")
+    assert calls == ["off"]  # 家常菜不重试
 
 
 # ---------- 碎片向量：正文 + caption 拼接 ----------

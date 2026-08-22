@@ -8,21 +8,28 @@
 export const MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 
 const MAX_EDGE = 1600
+const VISION_EDGE = 800  // 识别副本：认菜名/读品牌 800px 足够，比 1600px 更快
 const JPEG_QUALITY = 0.8
 
 export interface PreparedImage {
   /** 原图（不压，直接上传） */
   original: File
-  /** 1600px JPEG 展示图（上传为 {uuid}_d.jpg 副本；embedding/caption 也用它） */
+  /** 1600px JPEG 展示图（上传为 {uuid}_d.jpg 副本；embedding 也用它） */
   display: Blob
+  /** 800px JPEG 识别图（上传为 {uuid}_s.jpg 副本；视觉识别/caption 用它，更快） */
+  vision: Blob
 }
 
 export async function prepareImage(file: File): Promise<PreparedImage> {
   if (file.size > MAX_UPLOAD_BYTES) throw new Error("图片太大（超过 20MB），换一张试试")
-  return { original: file, display: await compressImage(file) }
+  return {
+    original: file,
+    display: await compressImage(file, MAX_EDGE),
+    vision: await compressImage(file, VISION_EDGE),
+  }
 }
 
-export async function compressImage(file: File): Promise<Blob> {
+export async function compressImage(file: File, maxEdge: number = MAX_EDGE): Promise<Blob> {
   let bitmap: ImageBitmap
   try {
     bitmap = await createImageBitmap(file)
@@ -30,7 +37,7 @@ export async function compressImage(file: File): Promise<Blob> {
     throw new Error("图片读取失败，换一张试试")
   }
   try {
-    const scale = Math.min(1, MAX_EDGE / Math.max(bitmap.width, bitmap.height))
+    const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height))
     const canvas = document.createElement("canvas")
     canvas.width = Math.max(1, Math.round(bitmap.width * scale))
     canvas.height = Math.max(1, Math.round(bitmap.height * scale))

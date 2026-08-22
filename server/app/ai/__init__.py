@@ -10,6 +10,7 @@
 import base64
 import json
 import logging
+import re
 import threading
 
 import numpy as np
@@ -114,6 +115,13 @@ def embed_texts(texts: list[str]) -> list[np.ndarray]:
     """批量文本向量（启动灌库等批量场景）：一次请求多条，逐条调会把启动卡到分钟级。"""
     _require_embedding()
     return embedding.embed_batch(texts)
+
+
+def embed_food_image(image_bytes: bytes, fmt: str = "jpeg") -> np.ndarray:
+    """食物图片向量（图片型 RAG）：多模态 embedding，与文本向量同空间。
+    未配置/调用失败抛错，调用方自行降级（识别走常管线、确认跳过入库）。"""
+    _require_embedding()
+    return embedding.embed_image(image_bytes, fmt)
 
 
 def image_caption(image_bytes: bytes, fmt: str = "jpeg") -> str:
@@ -415,18 +423,32 @@ def recognize_food(image_path: str, hint: str = "", calibration: list[dict] | No
         f"- {c['name']}：你上次估 {c['ai_grams']:g}g，用户实际是 {c['user_grams']:g}g"
         for c in calibration or []
     ) or "（无）"
+    prompt = FOOD_PROMPT.format(hint=hint, calibration=calib_text)
     try:
         result = vision.vision_json(
-            image_path, FOOD_PROMPT.format(hint=hint, calibration=calib_text),
-            reasoning=settings.vision_reasoning("food"),
+            image_path, prompt, reasoning=settings.vision_reasoning("food")
         )
         if not isinstance(result, dict):
             raise ValueError(f"食物识别应返回对象，实际为 {type(result).__name__}")
+        # 两级策略：快档（food 默认 off）先出；模型自报包装食品但没读出品牌时
+        # 带思考重试一次（读包装小字是精细活，实测 off 会漏品牌，见 BUG-018 排查记录）
+        items = result.get("items") or []
+        need_retry = any(
+            isinstance(i, dict)
+            and i.get("packaged")
+            and not str(i.get("brand") or "").strip()
+            for i in items
+        )
+        if need_retry and settings.vision_reasoning("food") != "on":
+            retried = vision.vision_json(image_path, prompt, reasoning="on")
+            if isinstance(retried, dict):
+                result = retried
         return result
     except Exception as exc:  # noqa: BLE001
         _state.degraded = True
-        logger.warning("食物识别失败，按未配置口径跳过：%s", exc)
-        return None
+        logger.warning("食物识别失败：%s", exc)
+        # 抛错而非返回 None：None 的语义是「未配置」，调用失败要说真话（曾误报"未配置视觉模型"）
+        raise RuntimeError(f"视觉模型调用失败：{exc}") from exc
 
 
 def _opt_macro(raw) -> float | None:
@@ -441,19 +463,36 @@ def _opt_macro(raw) -> float | None:
 def web_search_food(name: str, brand: str = "") -> dict | None:
     """联网查食物每 100g 营养（营养共建信任管线的核验/兜底数据源）。
 
-    brand 非空时按品牌款精准查（包装营养标签口径）。降级链：LLM_WEB_SEARCH≠on
-    （默认 off）→ None（不联网）；未配置 LLM / 调用失败 / 结果非法 → None。
+    联网通道二选一：树洞配置是 Kimi 系（moonshot/kimi.com）→ 内置 $web_search 真联网
+    （回声协议见 llm.chat_messages）；否则回退 LLM_* + enable_search（阿里百炼写法，
+    厂商不认会忽略→模型硬答，不算真联网）。降级链：LLM_WEB_SEARCH≠on（默认 off）→ None；
+    未配置 / 调用失败 / 结果非法 → None。
     """
     name = (name or "").strip()
     brand = (brand or "").strip()
-    if not name or not settings.web_search_enabled or not settings.LLM_API_KEY:
+    if not name or not settings.web_search_enabled:
         return None
+    brand_hint = f"品牌：{brand}。" if brand else ""
+    prompt = WEB_SEARCH_FOOD_PROMPT.format(name=name, brand_hint=brand_hint)
     try:
-        # enable_search 是厂商相关参数（阿里百炼写法），厂商不支持会忽略/报错 → 走降级
-        brand_hint = f"品牌：{brand}。" if brand else ""
-        result = llm.chat_json(
-            WEB_SEARCH_FOOD_PROMPT.format(name=name, brand_hint=brand_hint), enable_search=True
-        )
+        cfg = settings.treehole_llm()
+        kimi_hosted = "moonshot" in cfg[1] or "kimi.com" in cfg[1]
+        if cfg[0] and kimi_hosted:
+            text = llm.chat_messages(
+                [{"role": "user", "content": prompt}],
+                cfg=cfg,
+                tools=[{"type": "builtin_function", "function": {"name": "$web_search"}}],
+                timeout=90.0,
+            )
+            match = re.search(r"\{.*\}", text, re.DOTALL)
+            if not match:
+                raise ValueError(f"联网返回非 JSON：{text[:80]}")
+            result = json.loads(match.group(0))
+        else:
+            if not settings.LLM_API_KEY:
+                return None
+            # enable_search 是厂商相关参数（阿里百炼写法），厂商不支持会忽略/报错 → 走降级
+            result = llm.chat_json(prompt, enable_search=True)
         kcal = float(result.get("kcal_per_100g"))
         if not 0 < kcal <= 1000:
             raise ValueError(f"联网返回的 kcal_per_100g 越界：{kcal}")

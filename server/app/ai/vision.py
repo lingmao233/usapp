@@ -4,6 +4,7 @@
 """
 import base64
 import json
+import logging
 import os
 import re
 
@@ -11,22 +12,62 @@ import httpx
 
 from ..config import settings
 
+logger = logging.getLogger("us.ai.vision")
+
+
+def _post(payload: dict, timeout: float = 60.0) -> dict:
+    """POST chat/completions。识别类任务统一 temperature=0（压采样波动，同图同结果）。
+
+    厂商容错：阿里部分端点只认 minimal/off，把 low/medium/high 映射成非法 thinking_budget
+    直接 400（"The thinking_budget parameter must be..."）——剥掉思考参数重试一次，
+    不思考好过整个功能不可用（见 docs/BUG记录.md BUG-018）。
+    """
+    payload.setdefault("temperature", 0)
+    url = f"{settings.VISION_BASE_URL.rstrip('/')}/chat/completions"
+    headers = {"Authorization": f"Bearer {settings.VISION_API_KEY}"}
+    resp = httpx.post(url, headers=headers, json=payload, timeout=timeout)
+    # getattr 兼容测试桩（桩的 Resp 没有 status_code）
+    if getattr(resp, "status_code", None) == 400 and (
+        "reasoning_effort" in payload or "enable_thinking" in payload
+    ):
+        body = resp.text
+        if "thinking" in body or "reasoning" in body:
+            logger.warning("视觉厂商不接受思考参数（%s），剥掉重试一次", body[:120])
+            payload = {k: v for k, v in payload.items()
+                       if k not in ("reasoning_effort", "enable_thinking")}
+            resp = httpx.post(url, headers=headers, json=payload, timeout=timeout)
+    resp.raise_for_status()
+    return resp.json()
+
 
 def _apply_reasoning(payload: dict, level: str) -> None:
-    """把思考强度写进请求体。off → enable_thinking=false（阿里系关思考）；
-    其余档 → reasoning_effort（豆包/OpenAI 系）。两种字段不支持的厂商会忽略，调用方无感。"""
+    """把思考强度写进请求体。on → enable_thinking=true / off → enable_thinking=false
+    （阿里系开关写法）；on:N 附带 thinking_budget=N（阿里 Qwen3.x 的思考预算，1~32768）；
+    其余档（minimal/low/medium/high）→ reasoning_effort（豆包/OpenAI 系，Kimi k3 为 low/high/max）。
+    两种字段不支持的厂商会忽略或被 _post 容错重试，调用方无感。"""
     if not level:
         return
-    if level == "off":
+    if level == "on":
+        payload["enable_thinking"] = True
+    elif level == "off":
         payload["enable_thinking"] = False
+    elif level.startswith("on:"):
+        # 阿里 Qwen3.x 原生强度写法：enable_thinking + thinking_budget（非法预算只开不限额）
+        payload["enable_thinking"] = True
+        try:
+            budget = int(level[3:])
+            if 1 <= budget <= 32768:
+                payload["thinking_budget"] = budget
+        except ValueError:
+            pass
     else:
         payload["reasoning_effort"] = level
 
 
-def vision_ask(image_bytes: bytes, prompt: str, fmt: str = "jpeg", reasoning: str = "") -> str:
+def vision_ask(image_bytes: bytes, prompt: str, fmt: str = "jpeg", reasoning: str = "",
+               timeout: float = 60.0) -> str:
     """视觉模型单轮问答：图片（base64 内嵌）+ 自定义 prompt。调用方负责开关与失败兜底。"""
     data_url = f"data:image/{fmt};base64,{base64.b64encode(image_bytes).decode()}"
-    url = f"{settings.VISION_BASE_URL.rstrip('/')}/chat/completions"
     payload = {
         "model": settings.VISION_MODEL,
         "messages": [
@@ -40,14 +81,7 @@ def vision_ask(image_bytes: bytes, prompt: str, fmt: str = "jpeg", reasoning: st
         ],
     }
     _apply_reasoning(payload, reasoning or settings.VISION_REASONING)
-    resp = httpx.post(
-        url,
-        headers={"Authorization": f"Bearer {settings.VISION_API_KEY}"},
-        json=payload,
-        timeout=30.0,
-    )
-    resp.raise_for_status()
-    return str(resp.json()["choices"][0]["message"]["content"]).strip()
+    return str(_post(payload, timeout)["choices"][0]["message"]["content"]).strip()
 
 
 def vision_caption(image_bytes: bytes, fmt: str = "jpeg", reasoning: str = "") -> str:
@@ -69,7 +103,8 @@ def vision_caption(image_bytes: bytes, fmt: str = "jpeg", reasoning: str = "") -
     )
 
 
-def vision_json(image_path: str, prompt: str, reasoning: str = "") -> dict | list:
+def vision_json(image_path: str, prompt: str, reasoning: str = "",
+                 timeout: float = 60.0) -> dict | list:
     """视觉模型结构化识别：图片 + prompt（要求只输出 JSON），返回解析后的 JSON。
 
     未配置视觉模型抛 RuntimeError；剥掉可能的 markdown ```json fence 后解析，
@@ -81,7 +116,6 @@ def vision_json(image_path: str, prompt: str, reasoning: str = "") -> dict | lis
         image_bytes = f.read()
     fmt = os.path.splitext(image_path)[1].lstrip(".").lower().replace("jpg", "jpeg") or "jpeg"
     data_url = f"data:image/{fmt};base64,{base64.b64encode(image_bytes).decode()}"
-    url = f"{settings.VISION_BASE_URL.rstrip('/')}/chat/completions"
     payload = {
         "model": settings.VISION_MODEL,
         "messages": [
@@ -96,14 +130,7 @@ def vision_json(image_path: str, prompt: str, reasoning: str = "") -> dict | lis
     }
     # 深度思考类模型可压思考强度省 token；未配置时不传该参，对不支持它的模型零风险
     _apply_reasoning(payload, reasoning or settings.VISION_REASONING)
-    resp = httpx.post(
-        url,
-        headers={"Authorization": f"Bearer {settings.VISION_API_KEY}"},
-        json=payload,
-        timeout=30.0,
-    )
-    resp.raise_for_status()
-    text = str(resp.json()["choices"][0]["message"]["content"]).strip()
+    text = str(_post(payload, timeout)["choices"][0]["message"]["content"]).strip()
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text)
     try:
         return json.loads(text)

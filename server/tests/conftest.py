@@ -16,7 +16,7 @@ import tempfile
 os.environ["DB_PATH"] = os.path.join(tempfile.mkdtemp(prefix="us_test_"), "test.db")
 for _k in ("LLM_API_KEY", "EMBEDDING_API_KEY", "VISION_API_KEY", "VISION_MODEL",
            "TREEHOLE_API_KEY", "TREEHOLE_BASE_URL", "TREEHOLE_MODEL", "TREEHOLE_WEB_SEARCH",
-           "LLM_TEMPERATURE"):
+           "LLM_TEMPERATURE", "LLM_WEB_SEARCH"):
     os.environ[_k] = ""
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 

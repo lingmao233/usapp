@@ -17,6 +17,12 @@ os.environ["LLM_API_KEY"] = ""
 os.environ["EMBEDDING_API_KEY"] = ""
 os.environ["VISION_API_KEY"] = ""
 os.environ["VISION_MODEL"] = ""
+# 开关类也要清：本机 .env 开了联网的话，web_search_food 桩会从 None 变成给确定性结果，
+# 「全不中回退模型估值」的断言就被污染（BUG-016 同款环境泄漏）
+os.environ["LLM_WEB_SEARCH"] = ""
+os.environ["TREEHOLE_API_KEY"] = ""
+os.environ["TREEHOLE_BASE_URL"] = ""
+os.environ["TREEHOLE_MODEL"] = ""
 SERVER_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, SERVER_DIR)
 
@@ -50,10 +56,11 @@ def _new_user(client: TestClient, name: str = "记账测试圈") -> str:
 
 
 def _image_url() -> str:
-    """造一张站内存量的假图（识别路由只校验文件存在，不解析内容）。"""
+    """造一张站内存量的假图（识别路由只校验文件存在，不解析内容）。
+    每次内容唯一：图片型 RAG 按字节哈希取向量，相同字节会被当成同一张图命中历史。"""
     settings.upload_dir.mkdir(parents=True, exist_ok=True)
     stem = uuid.uuid4().hex
-    (settings.upload_dir / f"{stem}.jpg").write_bytes(b"\xff\xd8\xff\xd9")
+    (settings.upload_dir / f"{stem}.jpg").write_bytes(b"\xff\xd8\xff\xd9" + uuid.uuid4().bytes)
     return f"/api/uploads/{stem}.jpg"
 
 
@@ -310,6 +317,197 @@ def test_update_grams_validation(client: TestClient, monkeypatch) -> None:
     assert client.put(base, json={"account_id": uid, "index": 0, "grams": 99999}).status_code == 400
     assert client.put("/api/calories/ghost/items",
                       json={"account_id": uid, "index": 0, "grams": 300}).status_code == 404
+
+
+# ---------- 改名字：重匹配链 + 名字纠正 ----------
+
+def test_rename_item_table_hit(client: TestClient, monkeypatch) -> None:
+    """识别错的菜名改成成分表里有的：按新名单价×克数重算 kcal，记名字纠正。"""
+    uid = _new_user(client, "改名圈")
+    monkeypatch.setattr(ai, "recognize_food", lambda path, hint="", **_: {
+        "items": [{"name": "米饭", "grams": 200, "kcal": 232}], "note": ""})
+    entry = client.post("/api/calories/recognize", json={
+        "account_id": uid, "image_url": _image_url()}).json()["entry"]
+    r = client.put(f"/api/calories/{entry['id']}/items",
+                   json={"account_id": uid, "index": 0, "name": "鸡蛋"})
+    assert r.status_code == 200, r.text
+    item = r.json()["entry"]["items"][0]
+    assert item["name"] == "鸡蛋" and item["source"] == "table"
+    assert item["kcal_per_100g"] == 143.0          # 命中 鸡蛋(煮)（原名最短者胜）
+    assert item["kcal"] == round(143.0 * 200 / 100)  # 286
+    assert r.json()["entry"]["total_kcal"] == 286
+    rows = _db().execute(
+        "SELECT recognized_name, corrected_name FROM calorie_name_corrections WHERE account_id = ?",
+        (uid,)).fetchall()
+    assert [(r["recognized_name"], r["corrected_name"]) for r in rows] == [("米饭", "鸡蛋")]
+
+
+def test_rename_item_web_hit_then_kept_estimate(client: TestClient, monkeypatch) -> None:
+    """改名查表不中 → 联网搜到：写入 staging 标 web_pending 并按联网单价重算；
+    联网也搜不到 → 保留当前热量标 model。"""
+    uid = _new_user(client, "联网改名圈")
+    monkeypatch.setattr(ai, "recognize_food", lambda path, hint="", **_: {
+        "items": [{"name": "米饭", "grams": 200, "kcal": 232}], "note": ""})
+    entry = client.post("/api/calories/recognize", json={
+        "account_id": uid, "image_url": _image_url()}).json()["entry"]
+
+    monkeypatch.setattr(ai, "web_search_food", lambda name, brand="": {
+        "kcal_per_100g": 50.0, "protein_per_100g": None, "fat_per_100g": None, "cho_per_100g": None})
+    r = client.put(f"/api/calories/{entry['id']}/items",
+                   json={"account_id": uid, "index": 0, "name": "神秘果昔"})
+    item = r.json()["entry"]["items"][0]
+    assert item["name"] == "神秘果昔" and item["source"] == "web_pending"
+    assert item["kcal"] == 100 and item["kcal_per_100g"] == 50.0  # 50 × 200g
+    assert _db().execute(
+        "SELECT verified, source FROM food_nutrition_staging WHERE name = '神秘果昔'"
+    ).fetchone()["verified"] == 1
+
+    # 联网搜不到（None）：保留当前热量标 model，单价标记移除
+    monkeypatch.setattr(ai, "web_search_food", lambda name, brand="": None)
+    r = client.put(f"/api/calories/{entry['id']}/items",
+                   json={"account_id": uid, "index": 0, "name": "幻影料理"})
+    item = r.json()["entry"]["items"][0]
+    assert item["name"] == "幻影料理" and item["source"] == "model"
+    assert item["kcal"] == 100 and "kcal_per_100g" not in item
+
+
+def test_name_correction_applies_on_next_recognize(client: TestClient, monkeypatch) -> None:
+    """改名纠正后：下次识别出同一个错名，直接用纠正名查表与落库。"""
+    uid = _new_user(client, "纠正生效圈")
+    monkeypatch.setattr(ai, "recognize_food", lambda path, hint="", **_: {
+        "items": [{"name": "米饭", "grams": 100, "kcal": 116}], "note": ""})
+    entry = client.post("/api/calories/recognize", json={
+        "account_id": uid, "image_url": _image_url()}).json()["entry"]
+    client.put(f"/api/calories/{entry['id']}/items",
+               json={"account_id": uid, "index": 0, "name": "鸡蛋"})
+    # 再次识别出「米饭」→ 应用纠正：item 直接是鸡蛋（143/100g × 100g）
+    r = client.post("/api/calories/recognize", json={
+        "account_id": uid, "image_url": _image_url()})
+    item = r.json()["entry"]["items"][0]
+    assert item["name"] == "鸡蛋" and item["kcal"] == 143 and item["source"] == "table"
+
+
+# ---------- 手动录入即时匹配（lookup） ----------
+
+def test_lookup_food(client: TestClient) -> None:
+    """lookup：命中带克数算好总热量；不带克数只给单价；未命中 found=False。"""
+    uid = _new_user(client, "查询圈")
+    r = client.get("/api/calories/lookup", params={"account_id": uid, "name": "米饭", "grams": 200})
+    assert r.status_code == 200 and r.json()["found"] is True
+    assert r.json()["kcal_per_100g"] == 116.0 and r.json()["kcal"] == 232
+    r = client.get("/api/calories/lookup", params={"account_id": uid, "name": "米饭"})
+    assert "kcal" not in r.json() and r.json()["found"] is True
+    r = client.get("/api/calories/lookup", params={"account_id": uid, "name": "不存在的食物"})
+    assert r.json()["found"] is False
+
+
+def test_manual_add_with_items(client: TestClient) -> None:
+    """手动录入带结构化明细（食物名+克数+热量）：明细落库，当日记录可见可再改。"""
+    uid = _new_user(client, "手动明细圈")
+    r = client.post("/api/calories", json={
+        "account_id": uid, "total_kcal": 232, "note": "米饭",
+        "items": [{"name": "米饭", "kcal": 232, "grams": 200, "kcal_per_100g": 116.0,
+                   "source": "table"}]})
+    assert r.status_code == 200, r.text
+    body = client.get("/api/calories", params={"account_id": uid, "date": TODAY}).json()
+    saved = body["items"][0]
+    assert saved["items"][0]["name"] == "米饭" and saved["items"][0]["grams"] == 200
+    # 带单价的手动明细也能再改克数
+    r = client.put(f"/api/calories/{saved['id']}/items",
+                   json={"account_id": uid, "index": 0, "grams": 100})
+    assert r.status_code == 200 and r.json()["entry"]["items"][0]["kcal"] == 116
+
+
+# ---------- 图片型 RAG：以图搜图复用历史确认 ----------
+
+def _plant_image_bytes(content: bytes) -> str:
+    """造一张指定内容的站内图（图片向量桩按字节哈希：同内容=同图=同向量）。"""
+    settings.upload_dir.mkdir(parents=True, exist_ok=True)
+    stem = uuid.uuid4().hex
+    (settings.upload_dir / f"{stem}.jpg").write_bytes(content)
+    return f"/api/uploads/{stem}.jpg"
+
+
+def test_image_rag_hit_reuses_confirmed(client: TestClient, monkeypatch) -> None:
+    """确认入账后图片向量入库；再拍同一张图：直接复用上次的菜名/品牌/单价
+    （source=image_rag），识别模型把名字叫错了也被拉回确认值。"""
+    uid = _new_user(client, "图库圈")
+    img = _plant_image_bytes(b"\xff\xd8\xff\xd9-rag-hit")
+    monkeypatch.setattr(ai, "recognize_food", lambda path, hint="", **_: {
+        "items": [{"name": "米饭", "grams": 200, "kcal": 232}], "note": ""})
+    entry = client.post("/api/calories/recognize", json={
+        "account_id": uid, "image_url": img}).json()["entry"]
+    client.post("/api/calories", json={"account_id": uid, "id": entry["id"]})
+    rows = _db().execute(
+        "SELECT name, kcal_per_100g, typical_grams FROM calorie_food_images WHERE account_id = ?",
+        (uid,)).fetchall()
+    assert [(r["name"], r["kcal_per_100g"], r["typical_grams"]) for r in rows] == [("米饭", 116.0, 200.0)]
+
+    # 再拍同一张图，识别抖成「白米饭 250g」：名字/单价被图库拉回，克数按新图
+    monkeypatch.setattr(ai, "recognize_food", lambda path, hint="", **_: {
+        "items": [{"name": "白米饭", "grams": 250, "kcal": 999}], "note": ""})
+    entry2 = client.post("/api/calories/recognize", json={
+        "account_id": uid, "image_url": img}).json()["entry"]
+    item = entry2["items"][0]
+    assert item["source"] == "image_rag" and item["name"] == "米饭"
+    assert item["kcal_per_100g"] == 116.0 and item["kcal"] == round(116.0 * 250 / 100)
+
+
+def test_image_rag_miss_falls_back(client: TestClient, monkeypatch) -> None:
+    """不同的图（向量不相似）→ 走常管线（查表），不误复用。"""
+    uid = _new_user(client, "图库圈外")
+    img1 = _plant_image_bytes(b"\xff\xd8\xff\xd9-rag-A")
+    img2 = _plant_image_bytes(b"\xff\xd8\xff\xd9-rag-B-totally-different-image")
+    monkeypatch.setattr(ai, "recognize_food", lambda path, hint="", **_: {
+        "items": [{"name": "米饭", "grams": 200, "kcal": 232}], "note": ""})
+    entry = client.post("/api/calories/recognize", json={
+        "account_id": uid, "image_url": img1}).json()["entry"]
+    client.post("/api/calories", json={"account_id": uid, "id": entry["id"]})
+    entry2 = client.post("/api/calories/recognize", json={
+        "account_id": uid, "image_url": img2}).json()["entry"]
+    assert entry2["items"][0]["source"] == "table"  # 常管线查表（米饭在成分表）
+
+
+# ---------- 估值钳制与联网升级 ----------
+
+def test_model_estimate_physical_clamp(client: TestClient, monkeypatch) -> None:
+    """模型估值的隐含单价超物理上限（1000 kcal/100g，纯油约 900）→ 钳回上限。"""
+    uid = _new_user(client, "钳制圈")
+    monkeypatch.setattr(ai, "recognize_food", lambda path, hint="", **_: {
+        "items": [{"name": "神秘能量汤", "grams": 100, "kcal": 5000}], "note": ""})
+    r = client.post("/api/calories/recognize", json={
+        "account_id": uid, "image_url": _image_url()})
+    item = r.json()["entry"]["items"][0]
+    assert item["source"] == "model" and item["kcal"] == 1000  # 5000 → 钳到 1000
+
+
+def test_model_estimate_upgrade_after_web_backfill(client: TestClient, monkeypatch) -> None:
+    """估值入账 + 联网后台入库后：记录挂 upgrade 提示；同名重匹配按联网单价钱重算，
+    source 升 staging；名字没变不写名字纠正。"""
+    uid = _new_user(client, "升级圈")
+    monkeypatch.setattr(ai, "recognize_food", lambda path, hint="", **_: {
+        "items": [{"name": "神秘果汁", "grams": 250, "kcal": 1412}], "note": ""})
+    monkeypatch.setattr(ai, "web_search_food", lambda name, brand="": {
+        "kcal_per_100g": 45.0, "protein_per_100g": None, "fat_per_100g": None, "cho_per_100g": None})
+    r = client.post("/api/calories/recognize", json={
+        "account_id": uid, "image_url": _image_url()})
+    entry = r.json()["entry"]
+    assert entry["items"][0]["source"] == "model" and entry["items"][0]["kcal"] == 1412
+    client.post("/api/calories", json={"account_id": uid, "id": entry["id"]})
+    # 后台补库（TestClient 内联跑完）→ 今日记录该条目挂 upgrade
+    body = client.get("/api/calories", params={"account_id": uid, "date": TODAY}).json()
+    it = body["items"][0]["items"][0]
+    assert it["upgrade"] == {"kcal_per_100g": 45.0, "kcal": 112}  # 45 × 250g（round-half-even）
+    # 用户点「更新」：同名重匹配 → 按联网单价重算，source 升 staging
+    r = client.put(f"/api/calories/{entry['id']}/items",
+                   json={"account_id": uid, "index": 0, "name": "神秘果汁"})
+    assert r.status_code == 200, r.text
+    item2 = r.json()["entry"]["items"][0]
+    assert item2["kcal"] == 112 and item2["source"] == "staging"
+    rows = _db().execute(
+        "SELECT COUNT(*) AS c FROM calorie_name_corrections WHERE account_id = ?", (uid,)
+    ).fetchone()
+    assert rows["c"] == 0
 
 
 # ---------- 热量超预算 ↔ 计划 adjust 联动 ----------

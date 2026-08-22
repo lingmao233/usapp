@@ -21,15 +21,18 @@ def _require_account(account_id: str) -> None:
 
 
 def _load_image(image_url: str) -> tuple[bytes, str] | None:
-    """读上传图片为 (字节, fmt)：优先 1600px 展示副本（_d.jpg，更小）；
-    URL 形状非法或文件不存在返回 None（调用方降级纯文本）。"""
+    """读上传图片为 (字节, fmt)：优先 800px 识别副本（_s.jpg，更快），其次 1600px
+    展示副本（_d.jpg），最后原图；URL 形状非法或文件不存在返回 None（调用方降级纯文本）。"""
     m = _IMAGE_URL_RE.match(image_url or "")
     if not m:
         return None
     path = settings.upload_dir / m.group(1)
-    if not m.group(2):  # 原图：有展示副本优先用副本
+    if not m.group(2):  # 原图：有副本优先用副本
+        small = path.with_name(f"{path.stem}_s.jpg")
         display = path.with_name(f"{path.stem}_d.jpg")
-        if display.is_file():
+        if small.is_file():
+            path = small
+        elif display.is_file():
             path = display
     if not path.is_file():
         return None

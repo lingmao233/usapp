@@ -5,6 +5,7 @@ import type {
   AccountInfo,
   CalorieDay,
   CalorieEntry,
+  CalorieItem,
   ChatMessage,
   Circle,
   Comment,
@@ -178,11 +179,11 @@ export function createApi(req: RequestFn) {
     pairGraph: (circle_id: string, user_id: string) =>
       req<PairGraph>(`/api/circles/${circle_id}/graph?user_id=${user_id}`),
 
-    // 图片上传（发图片）：原图 + 1600px 展示图两份，平台 request 实现负责包成 multipart
-    uploadImage: (original: Blob, display?: Blob) =>
+    // 图片上传（发图片）：原图 + 1600px 展示图 + 可选 800px 识别图，平台 request 实现负责包成 multipart
+    uploadImage: (original: Blob, display?: Blob, vision?: Blob) =>
       req<{ url: string }>("/api/uploads", {
         method: "POST",
-        body: { file: original, display },
+        body: { file: original, display, vision },
       }),
 
     createFragment: (circle_id: string, user_id: string, content: string, visibility: "public" | "private" = "public", image_url?: string) =>
@@ -482,11 +483,18 @@ export function createApi(req: RequestFn) {
       return (res as { entry?: CalorieEntry }).entry ?? (res as CalorieEntry)
     },
 
-    // 手动录入（直接 confirmed；服务端触发超预算联动，adjustment 非空=已加调整条目）
-    addCalorie: (account_id: string, total_kcal: number, note: string) =>
+    // 手动录入（直接 confirmed；服务端触发超预算联动，adjustment 非空=已加调整条目）。
+    // items 可选：按食物名查表命中后的结构化明细（之后可逐项改克数/改名）
+    addCalorie: (account_id: string, total_kcal: number, note: string, items?: CalorieItem[]) =>
       req<{ id?: string; status?: string; adjustment?: { content?: string } | null }>(
         "/api/calories",
-        { method: "POST", body: { account_id, total_kcal, note } },
+        { method: "POST", body: { account_id, total_kcal, note, items } },
+      ),
+
+    // 手动录入即时匹配（只读）：查正式表/共建库；给 grams 时返回算好的 kcal
+    lookupCalorieFood: (account_id: string, name: string, grams?: number) =>
+      req<{ found: boolean; name?: string; kcal_per_100g?: number; source?: string; kcal?: number }>(
+        `/api/calories/lookup?account_id=${account_id}&name=${encodeURIComponent(name)}${grams ? `&grams=${grams}` : ""}`,
       ),
 
     // 确认待入账（带 id，总热量可改，改了服务端重算运动等效；同样触发联动）
@@ -496,17 +504,37 @@ export function createApi(req: RequestFn) {
         { method: "POST", body: { account_id, id, total_kcal, note } },
       ),
 
-    // 改某菜品的克数（pending/已入账都可）：服务端按 kcal_per_100g 重算 kcal 与总热量，
-    // 并记一条克数纠正（后续识别会拿纠正记录校准分量估计）
-    updateCalorieItem: (id: string, account_id: string, index: number, grams: number) =>
+    // 改某菜品（pending/已入账都可）：克数和/或名字；服务端重走匹配链并按单价重算，
+    // 克数/名字纠正落库（后续识别拿纠正记录校准，越用越准）
+    updateCalorieItem: (id: string, account_id: string, index: number,
+                        patch: { grams?: number; name?: string }) =>
       req<{ entry: CalorieEntry; adjustment?: { content?: string } | null }>(
         `/api/calories/${id}/items`,
-        { method: "PUT", body: { account_id, index, grams } },
+        { method: "PUT", body: { account_id, index, ...patch } },
       ),
 
     // 按日查询：{date, items, consumed_kcal, budget_kcal?}
     listCalories: (account_id: string, date: string) =>
       req<CalorieDay>(`/api/calories?account_id=${account_id}&date=${date}`),
+
+    // 删除一条热量记录（仅本人）
+    deleteCalorie: (id: string, account_id: string) =>
+      req<{ status?: string }>(`/api/calories/${id}?account_id=${account_id}`, {
+        method: "DELETE",
+      }),
+
+    // 我的识别纠正记录（名字/克数），纠正错了可删（删了下次识别不再生效）
+    listCalorieCorrections: (account_id: string) =>
+      req<{
+        names: { id: string; recognized_name: string; corrected_name: string; created_at: string }[]
+        grams: { id: string; name: string; ai_grams: number; user_grams: number; created_at: string }[]
+      }>(`/api/calories/corrections?account_id=${account_id}`),
+
+    deleteCalorieCorrection: (kind: "name" | "gram", id: string, account_id: string) =>
+      req<{ status?: string }>(
+        `/api/calories/corrections/${kind}/${id}?account_id=${account_id}`,
+        { method: "DELETE" },
+      ),
 
     /* ---------------- 营养共建（staging 预数据库） ---------------- */
 

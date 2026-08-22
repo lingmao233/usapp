@@ -11,6 +11,85 @@ function todayLocal() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
 }
 
+function shiftDay(day: string, delta: number): string {
+  const d = new Date(day + "T00:00:00")
+  d.setDate(d.getDate() + delta)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
+}
+
+/** 识别纠正记录管理（名字/克数）：纠正错了可删——删了下次识别不再生效 */
+function CorrectionsPanel({ accountId }: { accountId: string }) {
+  const [open, setOpen] = useState(false)
+  const [names, setNames] = useState<{ id: string; recognized_name: string; corrected_name: string; created_at: string }[]>([])
+  const [grams, setGrams] = useState<{ id: string; name: string; ai_grams: number; user_grams: number; created_at: string }[]>([])
+
+  async function loadCorrections() {
+    try {
+      const res = await api.listCalorieCorrections(accountId)
+      setNames(res.names)
+      setGrams(res.grams)
+    } catch {
+      /* 静默 */
+    }
+  }
+
+  async function remove(kind: "name" | "gram", id: string) {
+    try {
+      await api.deleteCalorieCorrection(kind, id, accountId)
+      await loadCorrections()
+    } catch {
+      /* 静默 */
+    }
+  }
+
+  return (
+    <section className="mt-10">
+      <button
+        className="us-btn-ghost text-xs"
+        onClick={() => {
+          const next = !open
+          setOpen(next)
+          if (next) loadCorrections()
+        }}
+      >
+        {open ? "收起" : "我的识别纠正记录"}（{open ? "" : "点我查看"}）
+      </button>
+      {open && (
+        <div className="mt-3 flex flex-col gap-2">
+          {names.length === 0 && grams.length === 0 && (
+            <p className="text-xs text-stone-400">还没有纠正记录（改菜名/改克数时会自动记下）</p>
+          )}
+          {names.map((c) => (
+            <div key={c.id} className="flex items-center justify-between text-sm border-b border-[#264653]/8 pb-2">
+              <span className="text-stone-600">
+                「{c.recognized_name}」→「{c.corrected_name}」
+                <span className="text-xs text-stone-400 ml-2">{c.created_at.slice(0, 10)}</span>
+              </span>
+              <button className="us-btn-ghost text-xs text-stone-400" onClick={() => remove("name", c.id)}>
+                删除
+              </button>
+            </div>
+          ))}
+          {grams.map((c) => (
+            <div key={c.id} className="flex items-center justify-between text-sm border-b border-[#264653]/8 pb-2">
+              <span className="text-stone-600">
+                {c.name}：{c.ai_grams}g → {c.user_grams}g
+                <span className="text-xs text-stone-400 ml-2">{c.created_at.slice(0, 10)}</span>
+              </span>
+              <button className="us-btn-ghost text-xs text-stone-400" onClick={() => remove("gram", c.id)}>
+                删除
+              </button>
+            </div>
+          ))}
+          <p className="text-xs text-stone-400 leading-relaxed mt-1">
+            这些纠正会让识别越来越贴合你；纠正错了删掉即可，下次识别不再生效。
+          </p>
+        </div>
+      )}
+    </section>
+  )
+}
+
 /** 运动等效文案：「跑步（8公里/小时）45 分钟」 */
 function equivText(v: ExerciseEquiv) {
   return `${v.name} ${Math.round(v.minutes)} 分钟`
@@ -18,6 +97,54 @@ function equivText(v: ExerciseEquiv) {
 
 function equivList(eq?: Record<string, ExerciseEquiv>): ExerciseEquiv[] {
   return Object.values(eq ?? {}).filter((v) => v && typeof v.minutes === "number" && v.minutes > 0)
+}
+
+/** 菜名内联编辑：点名字进编辑态，Enter/失焦保存（服务端重走匹配链重算热量并记名字纠正） */
+function NameField({ name, onSave }: { name: string; onSave: (n: string) => Promise<void> }) {
+  const [editing, setEditing] = useState(false)
+  const [text, setText] = useState("")
+  const [busy, setBusy] = useState(false)
+
+  async function save() {
+    const n = text.trim()
+    setEditing(false)
+    if (busy || !n || n === name) return
+    setBusy(true)
+    try {
+      await onSave(n)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (!editing) {
+    return (
+      <button
+        className="text-left underline decoration-dotted underline-offset-4 decoration-transparent hover:decoration-[#264653]/50 transition-colors"
+        title="识别错了？点我改名"
+        onClick={() => {
+          setText(name)
+          setEditing(true)
+        }}
+      >
+        {name}
+      </button>
+    )
+  }
+  return (
+    <input
+      autoFocus
+      className="us-input w-28 !py-0.5 !text-xs"
+      value={text}
+      disabled={busy}
+      onChange={(e) => setText(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" && !e.nativeEvent.isComposing) void save()
+        if (e.key === "Escape") setEditing(false)
+      }}
+      onBlur={() => void save()}
+    />
+  )
 }
 
 /** 克数内联编辑：点数字进编辑态，Enter/失焦保存（服务端按 kcal_per_100g 重算并记纠正） */
@@ -83,6 +210,7 @@ interface PendingEntry {
 
 export default function Calories({ accountId }: { accountId: string }) {
   const today = todayLocal()
+  const [day, setDay] = useState(today)  // 查看的热量记录日期（默认今天，可翻历史）
   const [entries, setEntries] = useState<CalorieEntry[]>([])
   const [consumed, setConsumed] = useState(0)
   const [budget, setBudget] = useState<number | null>(null)
@@ -95,10 +223,40 @@ export default function Calories({ accountId }: { accountId: string }) {
   const [pending, setPending] = useState<PendingEntry | null>(null)
   const [confirmBusy, setConfirmBusy] = useState(false)
   // 手动录入
+  const [mFood, setMFood] = useState("")
+  const [mGrams, setMGrams] = useState("")
   const [mKcal, setMKcal] = useState("")
   const [mNote, setMNote] = useState("")
   const [manualBusy, setManualBusy] = useState(false)
   const [submitError, setSubmitError] = useState("")
+  // 食物名即时匹配结果（查正式表/共建库，只读）
+  const [lookup, setLookup] = useState<
+    { found: true; name: string; kcal_per_100g: number; source?: string } | { found: false } | null
+  >(null)
+
+  // 食物名/克数变化后防抖查库：命中且给了克数 → 自动算总热量填入（仍可手改）
+  useEffect(() => {
+    const name = mFood.trim()
+    if (!name) {
+      setLookup(null)
+      return
+    }
+    const t = setTimeout(async () => {
+      try {
+        const g = Number(mGrams)
+        const res = await api.lookupCalorieFood(accountId, name, g > 0 ? g : undefined)
+        if (res.found) {
+          setLookup({ found: true, name: res.name ?? name, kcal_per_100g: res.kcal_per_100g ?? 0, source: res.source })
+          if (g > 0 && res.kcal) setMKcal(String(res.kcal))
+        } else {
+          setLookup({ found: false })
+        }
+      } catch {
+        setLookup(null)
+      }
+    }, 500)
+    return () => clearTimeout(t)
+  }, [mFood, mGrams, accountId])
   // 手动加食物（营养共建：入 staging 预数据库，后台联网核验）
   const [fName, setFName] = useState("")
   const [fBrand, setFBrand] = useState("")
@@ -111,7 +269,7 @@ export default function Calories({ accountId }: { accountId: string }) {
 
   const load = useCallback(async () => {
     try {
-      const res = await api.listCalories(accountId, today)
+      const res = await api.listCalories(accountId, day)
       setEntries(res.items)
       setConsumed(Math.round(res.consumed_kcal))
       setBudget(res.budget_kcal ?? null)
@@ -119,7 +277,7 @@ export default function Calories({ accountId }: { accountId: string }) {
       /* 静默，保持现状 */
     }
     setLoaded(true)
-  }, [accountId, today])
+  }, [accountId, day])
 
   useEffect(() => {
     load()
@@ -130,7 +288,7 @@ export default function Calories({ accountId }: { accountId: string }) {
     setRecBusy(true)
     setRecError("")
     try {
-      const url = (await api.uploadImage(image.original, image.display)).url
+      const url = (await api.uploadImage(image.original, image.display, image.vision)).url
       const entry = await api.recognizeFood(accountId, url, hint.trim() || undefined)
       setPending({
         id: entry.id,
@@ -189,11 +347,11 @@ export default function Calories({ accountId }: { accountId: string }) {
     setPending(null)
   }
 
-  /** 待确认卡改克数：服务端重算后整卡刷新（kcal/总热量/运动等效都变） */
-  async function handlePendingGrams(index: number, g: number) {
+  /** 待确认卡改条目（克数/名字）：服务端重算后整卡刷新（kcal/总热量/运动等效都变） */
+  async function handlePendingPatch(index: number, patch: { grams?: number; name?: string }) {
     if (!pending) return
     try {
-      const res = await api.updateCalorieItem(pending.id, accountId, index, g)
+      const res = await api.updateCalorieItem(pending.id, accountId, index, patch)
       const e = res.entry
       setPending({
         id: e.id,
@@ -210,34 +368,55 @@ export default function Calories({ accountId }: { accountId: string }) {
         exercise_equiv: e.exercise_equiv ?? {},
       })
     } catch {
-      setSubmitError("克数没改成，再试一次")
+      setSubmitError("没改成，再试一次")
     }
   }
 
-  /** 已入账记录改克数：重算 + 触发超预算联动，列表重载 */
-  async function handleEntryGrams(entryId: string, index: number, g: number) {
+  /** 已入账记录改条目（克数/名字）：重算 + 触发超预算联动，列表重载 */
+  async function handleEntryPatch(entryId: string, index: number,
+                                  patch: { grams?: number; name?: string }) {
     try {
-      const res = await api.updateCalorieItem(entryId, accountId, index, g)
+      const res = await api.updateCalorieItem(entryId, accountId, index, patch)
       setAdjustNotice(res.adjustment?.content ?? "")
       await load()
     } catch {
-      setSubmitError("克数没改成，再试一次")
+      setSubmitError("没改成，再试一次")
     }
   }
 
   async function handleManual() {
     const kcal = Number(mKcal)
-    if (!Number.isFinite(kcal) || kcal <= 0) {
-      setSubmitError("热量没填对")
+    if (!mKcal || !Number.isFinite(kcal) || kcal <= 0) {
+      setSubmitError(
+        lookup && lookup.found
+          ? "补个克数就自动算出来了，或直接填热量"
+          : "没查到这种食物，填一下热量（或下方收录进共建库）",
+      )
       return
     }
     setManualBusy(true)
     setSubmitError("")
     try {
-      const res = await api.addCalorie(accountId, Math.round(kcal), mNote.trim())
+      const food = mFood.trim()
+      const g = Number(mGrams)
+      const items = food
+        ? [{
+            name: food,
+            kcal: Math.round(kcal),
+            grams: g > 0 ? g : undefined,
+            kcal_per_100g: lookup && lookup.found ? lookup.kcal_per_100g : undefined,
+            source: lookup && lookup.found ? lookup.source : "model",
+          }]
+        : undefined
+      const res = await api.addCalorie(
+        accountId, Math.round(kcal), mNote.trim() || food, items,
+      )
       setAdjustNotice(res.adjustment?.content ?? "")
+      setMFood("")
+      setMGrams("")
       setMKcal("")
       setMNote("")
+      setLookup(null)
       await load()
     } catch {
       setSubmitError("录入失败，再试一次")
@@ -285,10 +464,10 @@ export default function Calories({ accountId }: { accountId: string }) {
       <h2 className="us-serif text-2xl mb-1">热量</h2>
       <p className="text-xs text-stone-500 mb-6">食物拍照估算热量，估算仅供参考</p>
 
-      {/* 今日累计 vs 预算（有减肥目标时服务端给 budget_kcal） */}
+      {/* 当日累计 vs 预算（有减肥目标时服务端给 budget_kcal） */}
       <section className="us-panel rounded-2xl p-5 mb-8">
         <div className="flex items-baseline justify-between mb-2">
-          <p className="us-serif text-base">今日已摄入</p>
+          <p className="us-serif text-base">{day === today ? "今日" : `${day} `}已摄入</p>
           <p className="text-sm">
             <span className="text-xl font-medium">{consumed}</span>
             <span className="text-stone-500"> kcal{budget !== null ? ` / 预算 ${budget}` : ""}</span>
@@ -343,11 +522,12 @@ export default function Calories({ accountId }: { accountId: string }) {
                   <div key={i} className="flex justify-between text-sm">
                     <span>
                       {x.brand ? <span className="text-[#264653]/70">{x.brand}·</span> : null}
-                      {x.name}
+                      <NameField name={x.name} onSave={(n) => handlePendingPatch(i, { name: n })} />
                       {x.grams ? (
                         <>
                           {" "}
-                          <GramsField grams={x.grams} onSave={(g) => handlePendingGrams(i, g)} />
+                          <GramsField grams={x.grams}
+                                      onSave={(g) => handlePendingPatch(i, { grams: g })} />
                         </>
                       ) : null}
                       {x.source === "table" && (
@@ -363,6 +543,16 @@ export default function Calories({ accountId }: { accountId: string }) {
                       {x.source === "web_pending" && (
                         <span className="ml-1 text-[10px] text-[#E76F51] border border-[#E76F51]/50 rounded px-1 align-middle">
                           待认可
+                        </span>
+                      )}
+                      {x.source === "model" && (
+                        <span className="ml-1 text-[10px] text-stone-400 border border-stone-300 rounded px-1 align-middle">
+                          估值
+                        </span>
+                      )}
+                      {x.source === "image_rag" && (
+                        <span className="ml-1 text-[10px] text-[#2A9D8F] border border-[#2A9D8F]/40 rounded px-1 align-middle">
+                          图库
                         </span>
                       )}
                     </span>
@@ -387,7 +577,7 @@ export default function Calories({ accountId }: { accountId: string }) {
               </p>
             )}
             <p className="text-xs text-stone-400 mb-3">
-              估算仅供参考；克数点一下就能改，改完会帮下次估得更准
+              估算仅供参考；名字和克数点一下就能改，改完会帮下次估得更准
             </p>
             <div className="flex gap-3">
               <button className="us-btn" disabled={confirmBusy} onClick={handleConfirm}>
@@ -401,10 +591,23 @@ export default function Calories({ accountId }: { accountId: string }) {
         )}
       </section>
 
-      {/* 手动录入 */}
+      {/* 手动录入：食物名 + 克数 + 热量（可空，查表命中自动填） */}
       <section className="mb-10">
         <p className="us-serif text-base mb-3">手动录入</p>
         <div className="flex gap-3 items-center flex-wrap">
+          <input
+            className="us-input flex-1 min-w-32"
+            placeholder="食物名，如「米饭」"
+            value={mFood}
+            onChange={(e) => setMFood(e.target.value)}
+          />
+          <input
+            className="us-input w-24"
+            type="number"
+            placeholder="克数 g"
+            value={mGrams}
+            onChange={(e) => setMGrams(e.target.value)}
+          />
           <input
             className="us-input w-32"
             type="number"
@@ -413,7 +616,7 @@ export default function Calories({ accountId }: { accountId: string }) {
             onChange={(e) => setMKcal(e.target.value)}
           />
           <input
-            className="us-input flex-1 min-w-32"
+            className="us-input flex-1 min-w-28"
             placeholder="备注（可空），如「午饭」"
             value={mNote}
             onChange={(e) => setMNote(e.target.value)}
@@ -422,6 +625,21 @@ export default function Calories({ accountId }: { accountId: string }) {
             {manualBusy ? "记…" : "录入"}
           </button>
         </div>
+        {lookup && (
+          <p className="text-xs mt-2 leading-relaxed">
+            {lookup.found ? (
+              <span className="text-[#2A9D8F]">
+                查到「{lookup.name}」：每 100g 约 {lookup.kcal_per_100g} kcal
+                {lookup.source === "staging" ? "（共建库，待核实）" : "（成分表）"}
+                {Number(mGrams) > 0 ? "，已按克数自动算好热量" : "，填上克数自动算热量"}
+              </span>
+            ) : (
+              <span className="text-stone-400">
+                库里没有「{mFood.trim()}」，手填热量即可，也可以下方收录进共建库
+              </span>
+            )}
+          </p>
+        )}
         {submitError && <p className="text-xs text-red-500 mt-2">{submitError}</p>}
       </section>
 
@@ -464,12 +682,27 @@ export default function Calories({ accountId }: { accountId: string }) {
         {foodMsg && <p className="text-xs text-stone-500 mt-1">{foodMsg}</p>}
       </section>
 
-      {/* 今日记录 */}
+      {/* 当日记录：可翻历史（← 前一天 / 后一天 →），每条可删 */}
       <section>
-        <h3 className="us-serif text-lg mb-3">今日记录</h3>
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="us-serif text-lg">{day === today ? "今日记录" : "当日记录"}</h3>
+          <div className="flex items-center gap-2 text-sm">
+            <button className="us-btn-ghost text-xs" onClick={() => setDay(shiftDay(day, -1))}>
+              ← 前一天
+            </button>
+            <span className="text-stone-500 text-xs">{day}</span>
+            <button
+              className="us-btn-ghost text-xs"
+              disabled={day >= today}
+              onClick={() => setDay(shiftDay(day, 1))}
+            >
+              后一天 →
+            </button>
+          </div>
+        </div>
         {entries.length === 0 ? (
           <p className="text-sm text-stone-400">
-            {loaded ? "今天还没有记录，拍一张？" : "加载中…"}
+            {loaded ? (day === today ? "今天还没有记录，拍一张？" : "这一天没有记录") : "加载中…"}
           </p>
         ) : (
           <div className="flex flex-col">
@@ -488,24 +721,58 @@ export default function Calories({ accountId }: { accountId: string }) {
                       ? e.items.map((x) => x.name).join("、")
                       : e.note || "手动录入"}
                   </span>
+                  <button
+                    className="us-btn-ghost text-xs text-stone-400 shrink-0"
+                    onClick={async () => {
+                      if (!window.confirm("删掉这条热量记录？")) return
+                      try {
+                        await api.deleteCalorie(e.id, accountId)
+                        await load()
+                      } catch {
+                        setSubmitError("删除失败，再试一次")
+                      }
+                    }}
+                  >
+                    删除
+                  </button>
                 </div>
-                {/* 有菜品明细（拍照识别）时逐条列出，克数可点改（改完重算并记纠正） */}
+                {/* 有菜品明细（拍照识别/手动带名）时逐条列出，名字与克数可点改（重算并记纠正） */}
                 {e.items.some((x) => x.grams) && (
                   <div className="flex flex-col gap-0.5 mt-1 pl-1">
                     {e.items.map((x, xi) => (
                       <p key={xi} className="text-xs text-stone-500">
                         {x.brand ? `${x.brand}·` : ""}
-                        {x.name}
+                        <NameField name={x.name}
+                                   onSave={(n) => handleEntryPatch(e.id, xi, { name: n })} />
                         {x.grams ? (
                           <>
                             {" "}
                             <GramsField
                               grams={x.grams}
-                              onSave={(g) => handleEntryGrams(e.id, xi, g)}
+                              onSave={(g) => handleEntryPatch(e.id, xi, { grams: g })}
                             />
                           </>
                         ) : null}
                         <span className="text-stone-400"> · {Math.round(x.kcal)} kcal</span>
+                        {x.source === "model" && (
+                          <span className="ml-1 text-[10px] text-stone-400 border border-stone-300 rounded px-1 align-middle">
+                            估值
+                          </span>
+                        )}
+                        {x.source === "image_rag" && (
+                          <span className="ml-1 text-[10px] text-[#2A9D8F] border border-[#2A9D8F]/40 rounded px-1 align-middle">
+                            图库
+                          </span>
+                        )}
+                        {x.upgrade && (
+                          <button
+                            className="ml-1 text-[10px] text-[#F4A261] border border-[#F4A261]/60 rounded px-1 align-middle hover:bg-[#F4A261]/10 transition-colors"
+                            title={`联网查到了：每 100g 约 ${x.upgrade.kcal_per_100g} kcal，点击按它重算`}
+                            onClick={() => handleEntryPatch(e.id, xi, { name: x.name })}
+                          >
+                            有查表数据，更新为 {x.upgrade.kcal} kcal
+                          </button>
+                        )}
                       </p>
                     ))}
                   </div>

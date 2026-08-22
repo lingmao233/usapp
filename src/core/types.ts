@@ -258,10 +258,13 @@ export interface CalorieItem {
   /** 每 100g 热量（查表/联网命中时落库）：改克数按它重算 kcal，不用重新匹配 */
   kcal_per_100g?: number
   /** table=查《中国食物成分表》计算，model=模型估值兜底，
-   *  staging=命中共建预数据库（待核实），web_pending=联网搜到（待认可） */
+   *  staging=命中共建预数据库（待核实），web_pending=联网搜到（待认可），
+   *  image_rag=以图搜图命中本账号历史确认图（复用菜名/单价） */
   source?: string
   /** source ∈ staging/web_pending 时指向 food_nutrition_staging 行，确认入账即计一次认可 */
   staging_id?: number
+  /** 估值条目专属：联网数据已入库时的可升级信息（用户点击才按新单价重算） */
+  upgrade?: { kcal_per_100g: number; kcal: number }
 }
 
 /** MET 运动等效：{running: {name: "跑步（8公里/小时）", met, minutes}, ...} */

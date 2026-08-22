@@ -276,6 +276,36 @@ CREATE TABLE IF NOT EXISTS calorie_gram_corrections (
 CREATE INDEX IF NOT EXISTS idx_gram_corrections_account
     ON calorie_gram_corrections(account_id, name);
 
+-- 名字纠正记录：用户改识别错的菜名时留痕（识别名 → 纠正名），下次识别同名食物
+-- 直接拿纠正名去查表（在线校准，与克数纠正同思路）
+CREATE TABLE IF NOT EXISTS calorie_name_corrections (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL REFERENCES accounts(id),
+    recognized_name TEXT NOT NULL,         -- AI 识别出的名字
+    corrected_name TEXT NOT NULL,          -- 用户改成的名字
+    entry_id TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_name_corrections_account
+    ON calorie_name_corrections(account_id, recognized_name);
+
+-- 图片型 RAG（以图搜图）：确认入账时把识别图向量化入库（账号级，隐私铁律不跨账号）。
+-- 再次拍到同种食物时直接复用上次的菜名/品牌/单价，识别更稳更快
+CREATE TABLE IF NOT EXISTS calorie_food_images (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL REFERENCES accounts(id),
+    name TEXT NOT NULL,                    -- 确认时的菜名（含用户纠正后的）
+    brand TEXT NOT NULL DEFAULT '',
+    kcal_per_100g REAL,                    -- 每 100g 热量单价（可空）
+    typical_grams REAL,                    -- 用户确认的克数（下次预填参考）
+    image_url TEXT NOT NULL DEFAULT '',
+    embedding BLOB,                        -- 多模态图片向量（doubao-embedding-vision）
+    entry_id TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_food_images_account
+    ON calorie_food_images(account_id);
+
 -- 鞭策：goal_id 与 plan_date 必居其一——目标鞭策=goal_id 非空/plan_date 空；
 -- 计划鞭策=plan_date='YYYY-MM-DD'（被鞭策的当天）/goal_id 空。限频对人不对类型
 CREATE TABLE IF NOT EXISTS nudges (
@@ -430,6 +460,7 @@ def init_db() -> None:
     _migrate_wishes_matched_status()
     _migrate_nudges_plan_date()
     _migrate_food_brand()
+    _migrate_staging_approvals_fk()
     _migrate_treehole_image_and_custom_persona()
     _seed_food_nutrition()
     get_conn().commit()
@@ -458,6 +489,31 @@ def _migrate_food_brand() -> None:
                        cho_per_100g{tail_old} FROM {table}_old"""
         )
         conn.execute(f"DROP TABLE {table}_old")
+
+
+def _migrate_staging_approvals_fk() -> None:
+    """存量修复：_migrate_food_brand 改名 food_nutrition_staging 时，SQLite 会把
+    food_staging_approvals 里的外键引用自动改写成 food_nutrition_staging_old；
+    旧表删除后外键悬空，开着 foreign_keys 的库写 approvals 全报
+    "no such table: main.food_nutrition_staging_old"（见 docs/BUG记录.md BUG-020）。
+
+    检测建表 SQL 里的悬空引用，命中则按当前 SCHEMA 重建并搬回仍有效的数据。
+    """
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='food_staging_approvals'"
+    ).fetchone()
+    if row is None or "food_nutrition_staging_old" not in (row["sql"] or ""):
+        return
+    conn.execute("ALTER TABLE food_staging_approvals RENAME TO food_staging_approvals_old")
+    conn.executescript(SCHEMA)  # 建新表（IF NOT EXISTS，其他表不受影响）
+    # 只搬回 staging 行还在的记录（已删除的 staging 对应的认可记录本来就是垃圾）
+    conn.execute(
+        """INSERT OR IGNORE INTO food_staging_approvals
+           SELECT o.* FROM food_staging_approvals_old o
+           WHERE EXISTS (SELECT 1 FROM food_nutrition_staging s WHERE s.id = o.staging_id)"""
+    )
+    conn.execute("DROP TABLE food_staging_approvals_old")
 
 
 def _seed_food_nutrition() -> None:

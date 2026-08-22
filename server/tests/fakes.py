@@ -464,6 +464,9 @@ PATCHES: dict[str, object] = {
     "classify_fragment": classify,
     "embed_text": embed,
     "embed_texts": lambda texts: [embed(t) for t in texts],
+    "embed_food_image": lambda image_bytes, fmt="jpeg": embed(
+        hashlib.md5(image_bytes).hexdigest()  # 图片字节哈希 → 同图同向量（以图搜图可测）
+    ),
     "summarize_text": summarize,
     "generate_weekly_report": _weekly_report,
     "confirm_common_wishes": lambda *a, **k: [],
