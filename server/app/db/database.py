@@ -390,6 +390,8 @@ CREATE TABLE IF NOT EXISTS treehole_messages (
     role TEXT NOT NULL,                    -- user/assistant
     content TEXT NOT NULL,
     image_url TEXT NOT NULL DEFAULT '',    -- 树洞发图：/api/uploads/... 原图 URL（空=纯文本）
+    citations TEXT NOT NULL DEFAULT '[]',  -- assistant 轮的检索依据 [{kind,id,excerpt}]（刷新不丢）
+    tools TEXT NOT NULL DEFAULT '[]',      -- assistant 轮用过的工具名（历史可回看「刚刚查了」）
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_treehole_messages_account
@@ -428,6 +430,7 @@ CREATE TABLE IF NOT EXISTS treehole_persona (
     relationship TEXT NOT NULL DEFAULT '',  -- 与用户的关系
     background TEXT NOT NULL DEFAULT '',    -- 背景设定
     custom_prompt TEXT NOT NULL DEFAULT '', -- 整段人设粘贴：非空时优先于上面模板字段
+    thinking TEXT NOT NULL DEFAULT '',      -- 思考程度（fast/balanced/deep，空=balanced 模型默认）
     updated_at TEXT NOT NULL
 );
 """
@@ -706,7 +709,7 @@ def _migrate_fragments_caption() -> None:
 
 def _migrate_treehole_image_and_custom_persona() -> None:
     """存量迁移：treehole_messages 补 image_url 列（树洞发图）；
-    treehole_persona 补 custom_prompt 列（整段人设粘贴，非空时优先于模板字段）。"""
+    treehole_persona 补 custom_prompt 列（整段人设粘贴）与 thinking 列（思考程度档位）。"""
     conn = get_conn()
     cols = [r[1] for r in conn.execute("PRAGMA table_info(treehole_messages)").fetchall()]
     if cols and "image_url" not in cols:
@@ -714,6 +717,14 @@ def _migrate_treehole_image_and_custom_persona() -> None:
     cols = [r[1] for r in conn.execute("PRAGMA table_info(treehole_persona)").fetchall()]
     if cols and "custom_prompt" not in cols:
         conn.execute("ALTER TABLE treehole_persona ADD COLUMN custom_prompt TEXT NOT NULL DEFAULT ''")
+    if cols and "thinking" not in cols:
+        conn.execute("ALTER TABLE treehole_persona ADD COLUMN thinking TEXT NOT NULL DEFAULT ''")
+    # 树洞历史带依据/工具标签（刷新不丢）：老库补两列
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(treehole_messages)").fetchall()]
+    if cols and "citations" not in cols:
+        conn.execute("ALTER TABLE treehole_messages ADD COLUMN citations TEXT NOT NULL DEFAULT '[]'")
+    if cols and "tools" not in cols:
+        conn.execute("ALTER TABLE treehole_messages ADD COLUMN tools TEXT NOT NULL DEFAULT '[]'")
 
 
 def _migrate_circles_persona() -> None:

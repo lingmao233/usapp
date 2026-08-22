@@ -80,6 +80,11 @@ def last_call_degraded() -> bool:
     return getattr(_state, "degraded", False)
 
 
+def mark_degraded() -> None:
+    """服务层兜底降级时置位（如树洞节点 fallback）：任务层据此把运行记为 degraded。"""
+    _state.degraded = True
+
+
 _DEFAULT_CLASSIFY = {
     "type": "text",
     "tags": ["日常"],
@@ -580,27 +585,53 @@ from .prompts import (  # noqa: E402
     TREEHOLE_COMPRESS_PROMPT,
     TREEHOLE_IMAGE_PROMPT,
     TREEHOLE_REPLY_PROMPT,
-    TREEHOLE_REWRITE_PROMPT,
     TREEHOLE_ROUTE_PROMPT,
     TREEHOLE_TOOLS_PROMPT,
 )
 
 TREEHOLE_INTENTS = ("vent", "question", "data")
 
+# 树洞「思考程度」三档（用户可调，落 persona.thinking）-> 思考参数档位（见 ai/reasoning.py）。
+# 平衡=模型默认（不传参）；深思=high（k3 的 low/high/max）；快=off（能关则关，厂商不认会被剥参容错兜住）
+TREEHOLE_THINKING_TO_REASONING = {"fast": "off", "balanced": "", "deep": "high"}
 
-def treehole_route(message: str) -> str:
-    """① 意图路由：vent/question/data；非法输出回退 vent（倾诉是最安全的口径）。"""
+# token 预算（优化清单第 3 项）：prompt 各块截断上限，防长对话/大工具结果把每轮成本拖上天
+TREEHOLE_HISTORY_BUDGET = 6000   # 近 20 条原文总字符预算（超出截最早的条目）
+TREEHOLE_TOOL_BUDGET = 1500      # 工具结果 JSON 字符预算（超出截断，保留前段）
+
+
+def _budget_messages(history: list[dict], budget: int) -> list[dict]:
+    """从最新往回收历史条目，总字符超预算时丢最早的（保最近的上下文）。"""
+    out: list[dict] = []
+    total = 0
+    for m in reversed(history or []):
+        cost = len(str(m.get("content") or ""))
+        if out and total + cost > budget:
+            break
+        out.append(m)
+        total += cost
+    out.reverse()
+    return out
+
+
+def _budget_json(data, budget: int) -> str:
+    """JSON 序列化超预算时截断（保留前段有效信息），标注省略。"""
+    text = json.dumps(data, ensure_ascii=False)
+    return text if len(text) <= budget else text[:budget] + "…（已截断）"
+
+
+def treehole_route(message: str) -> dict:
+    """① 意图路由 + 查询改写（一次调用出两件事，原两步串行合并省一次往返）：
+    {"intent": vent/question/data, "query": 检索查询}。倾诉（vent）不需要改写检索，
+    query 为空。非法输出回退 vent + 空 query（倾诉是最安全口径，检索退化为原句）。"""
     _require_treehole()
-    intent = llm.chat(TREEHOLE_ROUTE_PROMPT.format(message=message),
-                      timeout=30.0, cfg=settings.treehole_llm()).strip().lower()
-    return intent if intent in TREEHOLE_INTENTS else "vent"
-
-
-def treehole_rewrite(message: str) -> str:
-    """② 查询改写：情绪化输入 → 检索友好 query。"""
-    _require_treehole()
-    return llm.chat(TREEHOLE_REWRITE_PROMPT.format(message=message),
-                    timeout=30.0, cfg=settings.treehole_llm()).strip()[:50]
+    result = llm.chat_json(TREEHOLE_ROUTE_PROMPT.format(message=message),
+                           timeout=30.0, cfg=settings.treehole_llm())
+    intent = str(result.get("intent") or "").strip().lower()
+    if intent not in TREEHOLE_INTENTS:
+        return {"intent": "vent", "query": ""}
+    query = "" if intent == "vent" else str(result.get("query") or "").strip()[:50]
+    return {"intent": intent, "query": query}
 
 
 def treehole_tool_plan(message: str, intent: str, tools_desc: str, results: list[dict]) -> dict:
@@ -618,10 +649,11 @@ def treehole_tool_plan(message: str, intent: str, tools_desc: str, results: list
     return {"calls": calls}
 
 
-def treehole_reply(payload: dict) -> str:
+def treehole_reply(payload: dict, on_delta=None) -> str:
     """④ 人设扮演生成（消息制）：system 装人设/画像/记忆/检索/工具结果，history 与当前消息
     走 messages；当前消息可带图片 part（payload["image"] = data URL）；
-    树洞联网开启时挂 Kimi $web_search（回声协议在 llm.chat_messages）。"""
+    树洞联网开启时挂 Kimi $web_search（回声协议在 llm.chat_messages）。
+    on_delta(text) 存在时走流式：生成内容逐段回调（工具轮内容不外发），返回值仍为完整回复。"""
     _require_treehole()
     intent_labels = {"vent": "倾诉（先共情接住）", "question": "提问（给具体建议）",
                      "data": "查数据（如实使用工具结果）"}
@@ -649,11 +681,11 @@ def treehole_reply(payload: dict) -> str:
             "【较早历史的滚动摘要】\n" + json.dumps(payload["summary"], ensure_ascii=False)
             if payload.get("summary") else ""
         ),
-        tool_results=json.dumps(payload.get("tool_results") or [], ensure_ascii=False),
+        tool_results=_budget_json(payload.get("tool_results") or [], TREEHOLE_TOOL_BUDGET),
         intent_label=intent_labels.get(payload.get("intent") or "vent", "倾诉"),
     )
     messages: list[dict] = [{"role": "system", "content": system}]
-    for h in payload.get("history") or []:
+    for h in _budget_messages(payload.get("history") or [], TREEHOLE_HISTORY_BUDGET):
         role = "user" if h.get("role") == "user" else "assistant"
         messages.append({"role": role, "content": h.get("content", "")})
     if payload.get("image"):
@@ -666,8 +698,10 @@ def treehole_reply(payload: dict) -> str:
     messages.append({"role": "user", "content": current_content})
     tools = ([{"type": "builtin_function", "function": {"name": "$web_search"}}]
              if settings.treehole_web_search_enabled else None)
+    thinking = str((payload.get("persona") or {}).get("thinking") or "balanced")
     return llm.chat_messages(messages, cfg=settings.treehole_llm(), tools=tools,
-                             timeout=120.0).strip()
+                             timeout=120.0, on_delta=on_delta,
+                             reasoning=TREEHOLE_THINKING_TO_REASONING.get(thinking, "")).strip()
 
 
 def treehole_image_caption(image_bytes: bytes, fmt: str = "jpeg", user_text: str = "") -> str:

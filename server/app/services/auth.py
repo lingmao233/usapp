@@ -65,12 +65,16 @@ def _check_username(username: str) -> str:
 
 
 def _session_dict(account) -> dict:
-    """登录/注册成功返回的会话结构（recovery_code 只在注册/找回时附带，用于强制展示）。"""
+    """登录/注册成功返回的会话结构（recovery_code 只在注册/找回时附带，用于强制展示）。
+    device_token：设备令牌（services/tokens.py），前端存 localStorage 每次请求带 Bearer 头。"""
+    from .. import tokens
+
     return {
         "account_id": account["id"],
         "username": account["username"],
         "nickname": account["nickname"],
         "has_password": bool(account["password_hash"]),
+        "device_token": tokens.issue_token(account["id"]),
     }
 
 

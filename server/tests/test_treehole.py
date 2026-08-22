@@ -3,6 +3,7 @@
 
 运行：cd server && .venv-mac/bin/python -m pytest tests/test_treehole.py -v
 """
+import json
 import os
 import sqlite3
 import sys
@@ -124,8 +125,9 @@ def test_persona_custom_prompt_priority(client: TestClient, monkeypatch) -> None
 
     captured: dict = {}
 
-    def fake_chat_messages(messages, cfg=None, tools=None, timeout=120.0, max_tool_rounds=3):
-        captured.update(messages=messages, tools=tools, cfg=cfg)
+    def fake_chat_messages(messages, cfg=None, tools=None, timeout=120.0,
+                           max_tool_rounds=3, on_delta=None, reasoning=""):
+        captured.update(messages=messages, tools=tools, cfg=cfg, reasoning=reasoning)
         return "收到"
 
     monkeypatch.setattr(settings, "TREEHOLE_API_KEY", "test-key")
@@ -360,3 +362,231 @@ def test_rolling_summary_compression(client: TestClient) -> None:
 
     # L0 原文一条没少（摘要不替代原文，可回溯）
     assert layers.count_messages(acc["account_id"]) == 30
+
+
+# ---------- 2026-08-22 提速/降级/护栏前置/流式改造（优化实录见 docs） ----------
+
+
+def test_vent_skips_tools_node(client: TestClient, monkeypatch) -> None:
+    """倾诉轮结构性跳过工具节点：tool-plan LLM 一次都不调（原实现 vent 也逃不掉首轮）。"""
+    acc = _new_account(client, "提速圈")
+    calls: list[str] = []
+    orig = ai.treehole_tool_plan
+
+    def spy(message, intent, tools_desc, results):
+        calls.append(message)
+        return orig(message, intent, tools_desc, results)
+
+    monkeypatch.setattr(ai, "treehole_tool_plan", spy)
+    result = _chat(client, acc["account_id"], "今天被领导当众训了，真的很难受")
+    assert result["intent"] == "vent" and calls == []  # 倾诉：工具决策零调用
+    result2 = _chat(client, acc["account_id"], "我这个月花了多少钱")
+    assert result2["intent"] == "data" and len(calls) >= 1  # 查数据：照常决策
+
+
+def test_route_failure_degrades_to_vent(client: TestClient, monkeypatch) -> None:
+    """路由 LLM 挂了：降级为倾诉轮（检索用原句），整轮 200 不 500。"""
+    acc = _new_account(client, "降级圈")
+
+    def boom(message):
+        raise RuntimeError("kimi 超时")
+
+    monkeypatch.setattr(ai, "treehole_route", boom)
+    result = _chat(client, acc["account_id"], "最近换工作好纠结，你说我该怎么选")
+    assert result["intent"] == "vent" and result["reply"]
+
+
+def test_guardrail_short_circuits_generation(client: TestClient, monkeypatch) -> None:
+    """护栏前置：强烈自伤意愿在路由节点短路，生成 LLM 一次都不调（原实现生成后检，
+    命中时 120s 的回复已经花掉再整条丢弃）。"""
+    acc = _new_account(client, "前置圈")
+    replies: list[dict] = []
+    monkeypatch.setattr(ai, "treehole_reply",
+                        lambda payload, on_delta=None: replies.append(payload) or "不该出现")
+    result = _chat(client, acc["account_id"], "活着没意思，我不想活了")
+    assert result["guardrail"] is True and "400-161-9995" in result["reply"]
+    assert replies == []  # 生成被短路
+
+
+def test_guardrail_extended_signals() -> None:
+    """词表扩充：否定式存在表达触发；新夸张缓冲不误伤。"""
+    from app.services.treehole import guardrail
+    assert guardrail.is_strong_self_harm("我不想存在于这个世界")
+    assert guardrail.is_strong_self_harm("这样的日子什么时候是个头，真想解脱")
+    assert not guardrail.is_strong_self_harm("困得想死，明天还要早起")
+    assert not guardrail.is_strong_self_harm("无聊得想死，这电影也太长了")
+
+
+def test_chat_records_task_runs(client: TestClient) -> None:
+    """可观测性：每轮对话落 task_runs（treehole_chat），状态/起止时间可查。"""
+    acc = _new_account(client, "观测圈")
+    before = _db().execute(
+        "SELECT COUNT(*) AS c FROM task_runs WHERE task_name = 'treehole_chat'"
+    ).fetchone()["c"]
+    _chat(client, acc["account_id"], "随便说点什么")
+    row = _db().execute(
+        """SELECT status, started_at, finished_at FROM task_runs
+           WHERE task_name = 'treehole_chat' ORDER BY rowid DESC LIMIT 1"""
+    ).fetchone()
+    assert row["status"] in ("success", "degraded") and row["finished_at"]
+    after = _db().execute(
+        "SELECT COUNT(*) AS c FROM task_runs WHERE task_name = 'treehole_chat'"
+    ).fetchone()["c"]
+    assert after == before + 1
+
+
+def test_chat_stream_endpoint(client: TestClient) -> None:
+    """流式端点：SSE 事件流按 delta…done 顺序到达，done 带权威整包；
+    护栏轮没有 delta（命中即直达干预话术）。TestClient 会缓冲整包后返回，顺序仍可断言。"""
+    acc = _new_account(client, "流式圈")
+    with client.stream("POST", "/api/treehole/chat/stream",
+                       json={"account_id": acc["account_id"], "message": "今天有点累，想聊聊"}) as resp:
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/event-stream")
+        events = [json.loads(line[len("data:"):].strip())
+                  for line in resp.iter_lines() if line.startswith("data:")]
+    kinds = [e["type"] for e in events]
+    assert kinds[0] == "delta" and kinds[-1] == "done" and "error" not in kinds
+    assert "".join(e["text"] for e in events if e["type"] == "delta") == events[-1]["result"]["reply"]
+    # 护栏轮：无 delta，done 毫秒级直达
+    with client.stream("POST", "/api/treehole/chat/stream",
+                       json={"account_id": acc["account_id"], "message": "我不想活了"}) as resp:
+        events = [json.loads(line[len("data:"):].strip())
+                  for line in resp.iter_lines() if line.startswith("data:")]
+    assert [e["type"] for e in events] == ["done"]
+    assert events[0]["result"]["guardrail"] is True
+
+
+def test_tool_plan_failure_degrades(client: TestClient, monkeypatch) -> None:
+    """工具决策 LLM 挂了：当轮无工具继续生成，200 不 500。"""
+    acc = _new_account(client, "工具降级圈")
+
+    def boom(message, intent, tools_desc, results):
+        raise RuntimeError("kimi 5xx")
+
+    monkeypatch.setattr(ai, "treehole_tool_plan", boom)
+    result = _chat(client, acc["account_id"], "我这个月花了多少钱")
+    assert result["tools_used"] == [] and result["reply"]
+
+
+# ---------- 2026-08-22 追加：query_calories 菜名明细 + 思考程度参数 ----------
+
+
+def test_query_calories_returns_food_names(client: TestClient) -> None:
+    """「我吃了什么」要答得上来：summary/data 带每餐菜名明细（去重、上限截断），
+    支持指定 day；无明细的纯数字记录回退 note。"""
+    from datetime import date
+    from app.services.treehole import tools as treehole_tools
+
+    acc = _new_account(client, "吃什么圈")
+    conn = _db()
+    today = date.today().isoformat()
+    rows = [
+        ("c1", 500.0, json.dumps([{"name": "米饭", "kcal": 232},
+                                  {"name": "番茄炒蛋", "kcal": 170},
+                                  {"name": "米饭", "kcal": 98}], ensure_ascii=False), "午饭"),
+        ("c2", 300.0, json.dumps([{"name": "面条", "kcal": 300}], ensure_ascii=False), "晚饭"),
+        ("c3", 150.0, "[]", "加餐"),  # 无明细：回退 note
+    ]
+    for rid, kcal, items, note in rows:
+        conn.execute(
+            """INSERT INTO calorie_entries (id, account_id, total_kcal, items, note,
+               source, image_url, status, created_at)
+               VALUES (?, ?, ?, ?, ?, 'manual', '', 'confirmed', ?)""",
+            (rid, acc["account_id"], kcal, items, note, f"{today}T12:00:00"))
+    conn.commit()
+    out = treehole_tools.query_calories(acc["account_id"], {})
+    assert "吃了" in out["summary"] and "米饭" in out["summary"]
+    assert "番茄炒蛋" in out["summary"] and "面条" in out["summary"]
+    assert out["summary"].count("米饭") == 1  # 跨餐去重
+    details = out["data"]["meal_details"]
+    assert details[0]["foods"] == "米饭、番茄炒蛋"
+    assert details[2]["foods"] == "加餐"  # 空明细回退 note
+    # 指定 day
+    out2 = treehole_tools.query_calories(acc["account_id"], {"day": "2020-01-01"})
+    assert "还没有热量记录" in out2["summary"]
+
+
+def test_thinking_level_flows_to_llm(client: TestClient, monkeypatch) -> None:
+    """思考程度随人设卡存储并流到 LLM：deep → reasoning=high；默认 balanced → 不传参；
+    非法档位 400。"""
+    acc = _new_account(client, "思考圈")
+    captured: dict = {}
+    monkeypatch.setattr(settings, "TREEHOLE_API_KEY", "test-key")
+
+    def fake_chat_messages(messages, cfg=None, tools=None, timeout=120.0,
+                           max_tool_rounds=3, on_delta=None, reasoning=""):
+        captured["reasoning"] = reasoning
+        return "收到"
+
+    monkeypatch.setattr(ai.llm, "chat_messages", fake_chat_messages)
+    monkeypatch.setattr(ai, "treehole_reply", fakes.REAL_IMPLS["treehole_reply"])
+
+    _chat(client, acc["account_id"], "随便聊聊")
+    assert captured["reasoning"] == ""  # 默认：模型默认档（不传参）
+
+    r = client.put("/api/treehole/persona", json={
+        "account_id": acc["account_id"], "name": "阿青", "thinking": "deep"})
+    assert r.status_code == 200 and r.json()["thinking"] == "deep"
+    _chat(client, acc["account_id"], "再聊聊")
+    assert captured["reasoning"] == "high"  # 深思 → high
+
+    client.put("/api/treehole/persona", json={
+        "account_id": acc["account_id"], "name": "阿青", "thinking": "fast"})
+    _chat(client, acc["account_id"], "还聊聊")
+    assert captured["reasoning"] == "off"  # 快 → 关思考
+
+    r = client.put("/api/treehole/persona", json={
+        "account_id": acc["account_id"], "thinking": "ultra"})
+    assert r.status_code == 400  # 非法档位白名单拒收
+
+
+def test_llm_reasoning_400_strips_and_retries(monkeypatch) -> None:
+    """厂商拒思考参数（400 提到 thinking/reasoning）→ 剥掉重试一次，调用成功。"""
+    import httpx as _hx
+
+    from app.ai import llm as llm_mod
+
+    calls: list[dict] = []
+    req = _hx.Request("POST", "http://x/chat/completions")
+    resp400 = _hx.Response(
+        400, text='{"error":"The enable_thinking parameter is not supported"}', request=req)
+    resp200 = _hx.Response(
+        200, json={"choices": [{"message": {"content": "好的"}, "finish_reason": "stop"}]},
+        request=req)
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append(json)
+        return resp400 if len(calls) == 1 else resp200
+
+    monkeypatch.setattr(llm_mod.httpx, "post", fake_post)
+    out = llm_mod.chat_messages([{"role": "user", "content": "hi"}],
+                                cfg=("k", "http://x", "m"), reasoning="high")
+    assert out == "好的"
+    assert len(calls) == 2
+    assert calls[0]["reasoning_effort"] == "high"
+    assert "reasoning_effort" not in calls[1]  # 重试已剥掉思考参数
+
+
+def test_langmem_temperature_shares_llm_resolver(monkeypatch) -> None:
+    """langmem 的 ChatOpenAI 温度必须与 llm 层同一份解析（LLM_TEMPERATURE）——
+    k3 只接受 1，写死 0 会让 L1 记忆抽取全量 400、一次都写不进（BUG-024）。
+    注：test_config 会 reload(config)，模块里可能同时存活新旧两个 settings 实例
+    （llm.py 持旧、config.settings 是新）——两个都得 patch，单点 patch 在全量顺序下失灵。"""
+    import app.config as config
+
+    from app.ai import langmem_ext
+    from app.ai import llm as llm_mod
+
+    live = {id(s): s for s in (config.settings, llm_mod.settings)}
+    for s in live.values():
+        monkeypatch.setattr(s, "TREEHOLE_API_KEY", "test-key")  # 构造 ChatOpenAI 需要凭证
+        monkeypatch.setattr(s, "LLM_TEMPERATURE", "1")
+    monkeypatch.setattr(langmem_ext, "_manager", None)  # 清懒建缓存
+    llm_client = langmem_ext._build_llm()
+    assert llm_client.temperature == 1.0
+
+    for s in live.values():
+        monkeypatch.setattr(s, "LLM_TEMPERATURE", "")
+    monkeypatch.setattr(langmem_ext, "_manager", None)
+    assert langmem_ext._build_llm().temperature == 0.7  # 未配置回退默认，两侧行为一致

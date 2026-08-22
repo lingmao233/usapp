@@ -27,41 +27,21 @@ def _post(payload: dict, timeout: float = 60.0) -> dict:
     headers = {"Authorization": f"Bearer {settings.VISION_API_KEY}"}
     resp = httpx.post(url, headers=headers, json=payload, timeout=timeout)
     # getattr 兼容测试桩（桩的 Resp 没有 status_code）
-    if getattr(resp, "status_code", None) == 400 and (
-        "reasoning_effort" in payload or "enable_thinking" in payload
-    ):
-        body = resp.text
-        if "thinking" in body or "reasoning" in body:
-            logger.warning("视觉厂商不接受思考参数（%s），剥掉重试一次", body[:120])
-            payload = {k: v for k, v in payload.items()
-                       if k not in ("reasoning_effort", "enable_thinking")}
-            resp = httpx.post(url, headers=headers, json=payload, timeout=timeout)
+    if getattr(resp, "status_code", None) == 400:
+        from . import reasoning
+
+        if reasoning.is_set(payload) and reasoning.maybe_retry_note(resp.text):
+            logger.warning("视觉厂商不接受思考参数（%s），剥掉重试一次", resp.text[:120])
+            resp = httpx.post(url, headers=headers, json=reasoning.strip(payload), timeout=timeout)
     resp.raise_for_status()
     return resp.json()
 
 
 def _apply_reasoning(payload: dict, level: str) -> None:
-    """把思考强度写进请求体。on → enable_thinking=true / off → enable_thinking=false
-    （阿里系开关写法）；on:N 附带 thinking_budget=N（阿里 Qwen3.x 的思考预算，1~32768）；
-    其余档（minimal/low/medium/high）→ reasoning_effort（豆包/OpenAI 系，Kimi k3 为 low/high/max）。
-    两种字段不支持的厂商会忽略或被 _post 容错重试，调用方无感。"""
-    if not level:
-        return
-    if level == "on":
-        payload["enable_thinking"] = True
-    elif level == "off":
-        payload["enable_thinking"] = False
-    elif level.startswith("on:"):
-        # 阿里 Qwen3.x 原生强度写法：enable_thinking + thinking_budget（非法预算只开不限额）
-        payload["enable_thinking"] = True
-        try:
-            budget = int(level[3:])
-            if 1 <= budget <= 32768:
-                payload["thinking_budget"] = budget
-        except ValueError:
-            pass
-    else:
-        payload["reasoning_effort"] = level
+    """把思考强度写进请求体。档位语义与跨厂商写法统一在 ai/reasoning.py（与 llm 层共用）。"""
+    from . import reasoning
+
+    reasoning.apply(payload, level)
 
 
 def vision_ask(image_bytes: bytes, prompt: str, fmt: str = "jpeg", reasoning: str = "",

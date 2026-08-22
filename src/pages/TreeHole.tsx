@@ -9,6 +9,7 @@ import { useEffect, useRef, useState } from "react"
 import { ImagePlus, Send, X } from "lucide-react"
 import {
   api,
+  treeholeChatStream,
   type TreeholeCitation,
   type TreeholeMessage,
   type TreeholePersona,
@@ -50,7 +51,7 @@ const CITATION_KIND_LABEL: Record<string, string> = {
 }
 
 const PERSONA_FIELDS: {
-  key: keyof Omit<TreeholePersona, "default">
+  key: keyof Omit<TreeholePersona, "default" | "thinking">
   label: string
   placeholder: string
   multiline?: boolean
@@ -99,9 +100,10 @@ function PersonaSheet({
     setSaving(true)
     setError("")
     try {
-      // 模板模式保存时清空 custom_prompt：避免旧的整段人设继续压过刚填的模板
-      const body = mode === "custom" ? form : { ...form, custom_prompt: "" }
-      onSaved(await api.putTreeholePersona(accountId, body))
+      // 模板模式保存时清空 custom_prompt：避免旧的整段人设继续压过刚填的模板；
+      // thinking 由页头选择器管理，人设保存原样带上不重置
+      const base = mode === "custom" ? form : { ...form, custom_prompt: "" }
+      onSaved(await api.putTreeholePersona(accountId, { ...base, thinking: persona?.thinking }))
     } catch (e) {
       setError(e instanceof Error ? e.message : "保存失败，再试一次")
     } finally {
@@ -282,22 +284,42 @@ export default function TreeHole({ accountId }: { accountId: string }) {
         created_at: new Date().toISOString(),
       },
     ])
+    // 流式优先：delta 逐段长到本地气泡上；done 到达换成权威全文（含引用/工具）。
+    // 一个 delta 都没收到就挂了 → 回退整包接口重试（行为与旧版一致）；
+    // 已经流出一半才断 → 保留半截提示重发（回退重试可能重复生成，不自动重发）
+    const aid = `tmp-a-${Date.now()}`
+    setMessages((ms) => [...ms, {
+      id: aid, role: "assistant", content: "", created_at: new Date().toISOString(),
+    }])
+    let streamed = false
     try {
-      const r = await api.treeholeChat(accountId, text, imageUrl || undefined)
-      setMessages((ms) => [
-        ...ms,
-        {
-          id: `tmp-a-${Date.now()}`,
-          role: "assistant",
-          content: r.reply,
-          created_at: new Date().toISOString(),
-          citations: r.citations,
-          tools: r.tools_used,
-        },
-      ])
+      const r = await treeholeChatStream(accountId, text, imageUrl || undefined, (piece) => {
+        streamed = true
+        setMessages((ms) => ms.map((m) => (m.id === aid ? { ...m, content: m.content + piece } : m)))
+      })
+      setMessages((ms) => ms.map((m) => (m.id === aid ? {
+        ...m, content: r.reply, citations: r.citations as TreeholeCitation[] | undefined,
+        tools: r.tools_used,
+      } : m)))
     } catch {
-      /* 失败时乐观消息保留，用户可重发 */
-      setSendError("这句没发出去，再试一次")
+      if (!streamed) {
+        setMessages((ms) => ms.filter((m) => m.id !== aid)) // 撤掉空壳气泡走整包回退
+        try {
+          const r = await api.treeholeChat(accountId, text, imageUrl || undefined)
+          setMessages((ms) => [...ms, {
+            id: `tmp-a-${Date.now()}`,
+            role: "assistant",
+            content: r.reply,
+            created_at: new Date().toISOString(),
+            citations: r.citations,
+            tools: r.tools_used,
+          }])
+        } catch {
+          setSendError("这句没发出去，再试一次")
+        }
+      } else {
+        setSendError("回复中断了，这段可能没说完整；再发一次就好")
+      }
     } finally {
       setSending(false)
     }
@@ -324,6 +346,27 @@ export default function TreeHole({ accountId }: { accountId: string }) {
           <p className="text-xs text-stone-400 mt-0.5 truncate">正在和「{personaName}」说话</p>
         </div>
         <div className="flex items-center gap-1 shrink-0">
+          {/* 思考程度：随人设卡持久化（fast/balanced/deep → 后端思考参数档位） */}
+          <select
+            className="us-input !py-0.5 !text-xs w-16"
+            value={persona?.thinking || "balanced"}
+            title="思考程度：快=更快回（能关思考就关）；平衡=模型默认；深思=想得更细但更慢"
+            disabled={!persona}
+            onChange={async (e) => {
+              if (!persona) return
+              const thinking = e.target.value
+              try {
+                const { default: _isDefault, ...fields } = persona
+                setPersona(await api.putTreeholePersona(accountId, { ...fields, thinking }))
+              } catch {
+                /* 改不动保持原档（下次加载恢复真实值） */
+              }
+            }}
+          >
+            <option value="fast">快</option>
+            <option value="balanced">平衡</option>
+            <option value="deep">深思</option>
+          </select>
           <button className="us-btn-ghost text-xs" onClick={() => setPersonaOpen(true)}>
             人设
           </button>
@@ -405,7 +448,7 @@ export default function TreeHole({ accountId }: { accountId: string }) {
             </div>
           ))
         )}
-        {sending && (
+        {sending && !messages.some((m) => m.role === "assistant" && m.id.startsWith("tmp-a-") && m.content) && (
           <div className="self-start max-w-[85%] rounded-2xl bg-white/80 px-3.5 py-2 text-sm text-stone-400">
             正在想…
           </div>

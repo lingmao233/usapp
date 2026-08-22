@@ -45,6 +45,21 @@ export function clearAccountId(st: StorageLike) {
 
 const ACCOUNT_INFO_KEY = "us_account"
 
+const DEVICE_TOKEN_KEY = "us_device_token"
+
+/** 设备令牌（服务端签发，树洞等隐私接口做 Bearer 校验；拿不到时旧会话仍可用--过渡期） */
+export function loadDeviceToken(st: StorageLike): string | null {
+  return st.getItem(DEVICE_TOKEN_KEY)
+}
+
+export function saveDeviceToken(st: StorageLike, token: string | undefined | null) {
+  if (token) st.setItem(DEVICE_TOKEN_KEY, token)
+}
+
+export function clearDeviceToken(st: StorageLike) {
+  st.removeItem(DEVICE_TOKEN_KEY)
+}
+
 /** 登录态账号信息（auth 响应去掉一次性 recovery_code 后落盘） */
 export function loadAccount(st: StorageLike): AccountInfo | null {
   try {

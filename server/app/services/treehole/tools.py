@@ -68,21 +68,47 @@ def query_today_plan(account_id: str, args: dict) -> dict:
 
 
 def query_calories(account_id: str, args: dict) -> dict:
-    """今日热量：已入账条目合计 kcal + 餐数。"""
+    """某日热量：合计 + 餐数 + 每餐菜名明细（「我今天吃了什么」要能答上来，不是只报卡路里）。
+    day 可选 YYYY-MM-DD（默认今天）——「我昨天吃了什么」也接得住。"""
     conn = get_conn()
-    day = date.today().isoformat()
+    day = str((args or {}).get("day") or "").strip()
+    if day and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+        day = ""
+    day = day or date.today().isoformat()
     rows = conn.execute(
-        "SELECT total_kcal, note FROM calorie_entries"
-        " WHERE account_id = ? AND status = 'confirmed' AND substr(created_at, 1, 10) = ?",
+        "SELECT total_kcal, note, items FROM calorie_entries"
+        " WHERE account_id = ? AND status = 'confirmed' AND substr(created_at, 1, 10) = ?"
+        " ORDER BY created_at, rowid",
         (account_id, day),
     ).fetchall()
     total = sum(r["total_kcal"] for r in rows)
-    summary = (
-        f"今天已记录 {len(rows)} 餐，合计约 {total:.0f} kcal"
-        if rows else "今天还没有热量记录"
-    )
+    meals: list[dict] = []
+    for r in rows:
+        try:
+            items = json.loads(r["items"] or "[]")
+        except ValueError:
+            items = []
+        names: list[str] = []
+        for it in items if isinstance(items, list) else []:
+            if isinstance(it, dict) and str(it.get("name") or "").strip():
+                n = str(it["name"]).strip()
+                if n not in names:
+                    names.append(n)
+        label = "、".join(names[:8]) or str(r["note"] or "")[:30] or "未记录明细"
+        meals.append({"kcal": round(float(r["total_kcal"] or 0)), "foods": label})
+    if rows:
+        all_foods: list[str] = []
+        for m in meals:
+            for n in m["foods"].split("、"):
+                if n and n not in all_foods:
+                    all_foods.append(n)
+        foods_text = "、".join(all_foods[:15])
+        summary = f"{day} 已记录 {len(rows)} 餐，合计约 {total:.0f} kcal；吃了：{foods_text}"
+    else:
+        summary = f"{day} 还没有热量记录"
     return {"name": "query_calories", "summary": summary,
-            "data": {"date": day, "total_kcal": round(total, 1), "meals": len(rows)}}
+            "data": {"date": day, "total_kcal": round(total, 1), "meals": len(rows),
+                     "meal_details": meals}}
 
 
 def search_fragments(account_id: str, args: dict) -> dict:
@@ -125,7 +151,8 @@ def get_memory_profile(account_id: str, args: dict) -> dict:
 TOOLS = {
     "query_ledger": {"fn": query_ledger, "desc": "query_ledger(month?)：查本月支出合计与分类"},
     "query_today_plan": {"fn": query_today_plan, "desc": "query_today_plan()：查今日计划完成度"},
-    "query_calories": {"fn": query_calories, "desc": "query_calories()：查今日热量摄入"},
+    "query_calories": {"fn": query_calories,
+                       "desc": "query_calories(day?)：查某日（默认今天）热量摄入与吃了什么（菜名明细）"},
     "search_fragments": {"fn": search_fragments, "desc": "search_fragments(keyword)：关键词搜本人历史碎片"},
     "get_memory_profile": {"fn": get_memory_profile, "desc": "get_memory_profile()：读记忆画像（长期偏好/近期记忆）"},
 }

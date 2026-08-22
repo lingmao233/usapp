@@ -302,14 +302,15 @@ _DATA_KEYWORDS = ("多少钱", "花了", "支出", "账单", "记账", "预算",
 _QUESTION_KEYWORDS = ("？", "?", "吗", "为什么", "怎么办", "如何", "要不要", "该不该")
 
 
-def treehole_route(message: str) -> str:
-    """意图路由桩：数据关键词 → data；疑问词 → question；否则 vent。data 优先于疑问词
-    （"我这个月花了多少钱？"带问号但本质是查数据）。"""
+def treehole_route(message: str) -> dict:
+    """意图路由+查询改写合并桩（与真实门面同形：{"intent", "query"}）：
+    数据关键词 → data；疑问词 → question；否则 vent。data 优先于疑问词
+    （"我这个月花了多少钱？"带问号但本质是查数据）。vent 不做改写（query 空）。"""
     if any(k in message for k in _DATA_KEYWORDS):
-        return "data"
+        return {"intent": "data", "query": treehole_rewrite(message)}
     if any(k in message for k in _QUESTION_KEYWORDS):
-        return "question"
-    return "vent"
+        return {"intent": "question", "query": treehole_rewrite(message)}
+    return {"intent": "vent", "query": ""}
 
 
 def treehole_rewrite(message: str) -> str:
@@ -344,7 +345,7 @@ def treehole_tool_plan(message: str, intent: str, results: list[dict]) -> dict:
     return {"calls": calls}
 
 
-def treehole_reply(payload: dict) -> str:
+def treehole_reply(payload: dict, on_delta=None) -> str:
     """回复生成桩：模板化拼装，人设名/工具数据/引用全部显式出现，测试可逐点断言。"""
     persona = payload.get("persona") or {}
     name = (persona.get("name") or "").strip() or "树洞"
@@ -366,7 +367,11 @@ def treehole_reply(payload: dict) -> str:
     if citations:
         quoted = "；".join(f"「{c.get('excerpt', '')}」" for c in citations[:2])
         parts.append(f"我还记得你之前说过：{quoted}。")
-    return "\n".join(parts)
+    text = "\n".join(parts)
+    if on_delta:  # 流式路径演练：按 8 字一段回调，最后一段收尾（与真实口径一致：返回全文）
+        for i in range(0, len(text), 8):
+            on_delta(text[i : i + 8])
+    return text
 
 
 def treehole_image_caption(image_bytes: bytes, fmt: str = "jpeg", user_text: str = "") -> str:
@@ -482,7 +487,6 @@ PATCHES: dict[str, object] = {
     "generate_savings_advice": savings_advice,
     "web_search_food": _web_search_food,
     "treehole_route": treehole_route,
-    "treehole_rewrite": treehole_rewrite,
     "treehole_tool_plan": _treehole_tool_plan,
     "treehole_reply": treehole_reply,
     "treehole_image_caption": treehole_image_caption,

@@ -432,7 +432,8 @@ export interface TreeholeChatResp {
 }
 
 /** 树洞人设卡：未设立时服务端合成默认倾听者并标 default=true（前端据此显示「去设立」引导）。
- * custom_prompt 为整段粘贴人设：非空时生成优先于模板字段（name 仍用于界面显示） */
+ * custom_prompt 为整段粘贴人设：非空时生成优先于模板字段（name 仍用于界面显示）。
+ * thinking 为思考程度档位：fast=更快回 / balanced=模型默认 / deep=深思更细但更慢 */
 export interface TreeholePersona {
   name: string
   personality: string
@@ -440,5 +441,6 @@ export interface TreeholePersona {
   relationship: string
   background: string
   custom_prompt?: string
+  thinking?: string
   default: boolean
 }

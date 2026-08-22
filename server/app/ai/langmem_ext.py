@@ -57,19 +57,27 @@ _INSTRUCTIONS = """你在为私密树洞对话维护用户的长期记忆。从�
 _manager = None
 
 
+def _build_llm() -> ChatOpenAI:
+    """构造 langmem 用的 ChatOpenAI：模型随树洞专属配置（TREEHOLE_* 非空走 Kimi），
+    温度与 llm 层共用同一份解析（LLM_TEMPERATURE，k3 只接受 1——写死别的值会被
+    kimi.com/coding 网关全量 400，见 docs/BUG记录.md BUG-024）。"""
+    api_key, base_url, model = settings.treehole_llm()
+    from .llm import resolve_temperature
+
+    return ChatOpenAI(
+        model=model,
+        api_key=api_key,
+        base_url=base_url,
+        temperature=resolve_temperature(),
+    )
+
+
 def _get_manager():
     """懒建全局 manager（真实模式进程内复用；model 配置变化需重启进程）。"""
     global _manager
     if _manager is None:
-        api_key, base_url, model = settings.treehole_llm()  # L1 抽取随树洞专属配置（Kimi）
-        llm = ChatOpenAI(
-            model=model,
-            api_key=api_key,
-            base_url=base_url,
-            temperature=0,
-        )
         _manager = create_memory_manager(
-            llm,
+            _build_llm(),
             schemas=[PreferenceMemory, FactMemory, EventMemory, CommitmentMemory],
             instructions=_INSTRUCTIONS,
             enable_updates=False,  # L1 只增不改；巩固/去重留给 L2/L3 与后台任务

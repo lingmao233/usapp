@@ -65,6 +65,11 @@ class Settings:
     # LLM 采样温度（空 = 默认 0.7）：Kimi k3 等推理模型只接受 temperature=1，用这类模型时设 1
     LLM_TEMPERATURE: str = os.getenv("LLM_TEMPERATURE", "")
 
+    # 设备令牌鉴权（services/tokens.py）：secret 缺省时自动生成并持久化到 data/；
+    # TOKEN_ENFORCE=on 时未带令牌的请求 401（默认过渡期放行+告警，前端带上后收紧）
+    DEVICE_SECRET: str = os.getenv("DEVICE_SECRET", "")
+    TOKEN_ENFORCE: str = os.getenv("TOKEN_ENFORCE", "")
+
     def treehole_llm(self) -> tuple[str, str, str]:
         """树洞生效的 (api_key, base_url, model)：TREEHOLE_API_KEY 非空走 Kimi 组（带默认值），
         否则整体回退 LLM_* 组。"""

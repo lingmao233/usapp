@@ -99,6 +99,8 @@ def create_circle(
     user_id = _create_circle_user(circle_id, final_nickname)
     _create_membership(account_id, circle_id, user_id)
     conn.commit()
+    from .. import tokens
+
     return {
         "id": circle_id,
         "name": name,
@@ -109,6 +111,7 @@ def create_circle(
         "persona_preset": final_preset,
         "persona_custom": final_custom,
         "recovery_code": account["recovery_code"] if new_account else None,
+        "device_token": tokens.issue_token(account_id),
     }
 
 
@@ -156,6 +159,8 @@ def join_circle(invite_code: str, nickname: str | None, account_id: str | None =
             (account_id, circle["id"]),
         ).fetchone()
         if existing:
+            from .. import tokens
+
             return {
                 "user_id": existing["user_id"],
                 "nickname": existing["nickname"],
@@ -165,6 +170,7 @@ def join_circle(invite_code: str, nickname: str | None, account_id: str | None =
                 "account_id": account_id,
                 "already_joined": True,
                 "recovery_code": None,
+                "device_token": tokens.issue_token(account_id),
             }
     else:
         # 先校验昵称再创建 account，避免 409 留下孤儿身份
@@ -187,6 +193,8 @@ def join_circle(invite_code: str, nickname: str | None, account_id: str | None =
     user_id = _create_circle_user(circle["id"], final_nickname)
     _create_membership(account_id, circle["id"], user_id)
     conn.commit()
+    from .. import tokens
+
     return {
         "user_id": user_id,
         "nickname": final_nickname,
@@ -196,6 +204,7 @@ def join_circle(invite_code: str, nickname: str | None, account_id: str | None =
         "account_id": account_id,
         "already_joined": False,
         "recovery_code": account["recovery_code"] if new_account else None,
+        "device_token": tokens.issue_token(account_id),
     }
 
 

@@ -374,9 +374,9 @@ def main() -> None:
     payloads: list[dict] = []
     orig_reply = ai.treehole_reply
 
-    def _spying_reply(payload: dict) -> str:
+    def _spying_reply(payload: dict, **kwargs) -> str:
         payloads.append(payload)
-        return orig_reply(payload)
+        return orig_reply(payload, **kwargs)
 
     ai.treehole_reply = _spying_reply
     try:

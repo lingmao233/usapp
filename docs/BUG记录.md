@@ -323,3 +323,13 @@
   - 待确认卡「丢弃」改为真删（调已有 DELETE 端点，pending 行不再留库）
 - **验证**：`test_calorie_fixes.py`（总线跨线程投递/关闭注销/无人订阅 no-op/端点形状/未知账号 404；注：TestClient 的 ASGITransport 不支持增量流式，SSE 流式收发直驱总线测试而非 HTTP 层）；浏览器端 EventSource 行为靠部署后人工验证（见部署清单）。pytest 242/242，smoke 62 断言。
 - **预防**：**「后台异步完成 → 前端要能看到」的链路必须有到达机制（推送或轮询），否则功能等于随机出现**；升级提示的匹配键要跟随用户改名（raw_name）而不是死盯当前名——精确匹配脆断。
+
+## BUG-024 树洞 L1 记忆抽取全量 400：langmem 侧温度写死 0 被 k3 拒收
+
+- **日期**：2026-08-22
+- **环境**：本机 dev + 生产（真实模式独有——fakes 桩替换了 ai 门面，测试从不触达 langmem_ext，所以 271 个测试全绿也抓不到）
+- **现象**：每轮树洞对话后日志 `langmem 记忆抽取失败，本轮跳过写回：Error code: 400 - {'error': {'message': 'invalid temperature: only 1 is allowed for this model'}}`。对话本身正常（降级兜住），但 **L1 原子记忆一次都没写进去过**——检索池/画像注入的 L1 一路是空的。
+- **根因**：BUG-016 修「k3 只接受 temperature=1」时只改了 `llm.py`（LLM_TEMPERATURE 配置化）；但 L1 抽取走的是 langmem → langchain-openai 的 `ChatOpenAI`，`langmem_ext.py` 构造时**写死 `temperature=0`**，没过同一份解析。同一个约束在两条 LLM 出口上口径分裂。
+- **修复**：温度解析提为公共单点 `llm.resolve_temperature()`（读 LLM_TEMPERATURE，非法回退 0.7）；`langmem_ext._build_llm()` 改用该解析（抽出 `_build_llm` 便于离线断言）。全库 grep 确认无其他温度硬编码（vision 的 temp=0 走 VISION_* 自己的厂商，不受 k3 约束）。
+- **验证**：新增 `test_langmem_temperature_shares_llm_resolver`（LLM_TEMPERATURE=1 → ChatOpenAI.temperature==1.0；未配置 → 两侧一致 0.7）。踩了一个测试隔离坑：`test_config` 会 `importlib.reload(config)`，进程内可能同时存活新旧两个 settings 实例（llm.py 持旧、懒导入的 langmem_ext 拿新），单点 patch 在全量顺序下失灵——测试需 patch 全部活实例。pytest 271/271，树洞 eval 26/26，smoke 62。
+- **预防**：**同一约束（温度/超时/鉴权头这类厂商限制）落在多个 LLM 出口时必须收敛到单点解析，新增出口时 grep 一遍既有约束的落点**；「仅真实模式可达」的模块（langmem/vision 厂商调用）无法被 fakes 覆盖，真实端点的冒烟验证要进部署清单而不是只靠单测。
