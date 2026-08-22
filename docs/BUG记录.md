@@ -333,3 +333,13 @@
 - **修复**：温度解析提为公共单点 `llm.resolve_temperature()`（读 LLM_TEMPERATURE，非法回退 0.7）；`langmem_ext._build_llm()` 改用该解析（抽出 `_build_llm` 便于离线断言）。全库 grep 确认无其他温度硬编码（vision 的 temp=0 走 VISION_* 自己的厂商，不受 k3 约束）。
 - **验证**：新增 `test_langmem_temperature_shares_llm_resolver`（LLM_TEMPERATURE=1 → ChatOpenAI.temperature==1.0；未配置 → 两侧一致 0.7）。踩了一个测试隔离坑：`test_config` 会 `importlib.reload(config)`，进程内可能同时存活新旧两个 settings 实例（llm.py 持旧、懒导入的 langmem_ext 拿新），单点 patch 在全量顺序下失灵——测试需 patch 全部活实例。pytest 271/271，树洞 eval 26/26，smoke 62。
 - **预防**：**同一约束（温度/超时/鉴权头这类厂商限制）落在多个 LLM 出口时必须收敛到单点解析，新增出口时 grep 一遍既有约束的落点**；「仅真实模式可达」的模块（langmem/vision 厂商调用）无法被 fakes 覆盖，真实端点的冒烟验证要进部署清单而不是只靠单测。
+
+## BUG-025 commit 87bab44 错误相对导入：services 内 `from .. import tokens` 指向不存在的 app.tokens
+
+- **日期**：2026-08-23
+- **环境**：本机 dev（代码问题，`87bab44 优化` 这个 commit 引入；生产未部署该提交故未爆）
+- **现象**：该 commit 落地后全量 pytest 失败（162 个用例批量 ModuleNotFoundError: No module named 'app.tokens'），鉴权签发点（注册/登录/找回/建圈/入圈）与树洞 6 个路由全部不可用。
+- **根因**：`tokens.py` 位于 `app/services/` 包内，`auth.py`/`circles.py` 同包引用应写 `from . import tokens`；提交时误写成 `from .. import tokens`（`..` 是 `app` 包，`app.tokens` 不存在），共 4 处（auth.py 1 处、circles.py 3 处）。提交前没跑测试基线，坏 import 直接进了 commit。
+- **修复**：4 处改为 `from . import tokens`（2 行修复）；顺带 `.gitignore` 补 `server/data/device_secret`（设备令牌 HMAC 密钥文件，防泄漏进库）。
+- **验证**：工作区修复后全量 pytest 271/271 通过（12.9s）。
+- **预防**：**提交前必须跑一次全量测试基线**（坏 import 这类全量红灯十几秒就能拦住）；同包模块引用统一 `from . import xxx`，新增 services 子模块时先确认目标模块的包路径再写相对导入。
