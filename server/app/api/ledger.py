@@ -1,7 +1,10 @@
 from fastapi import APIRouter, BackgroundTasks
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from ..services import ledger as svc
+from ..db.database import get_conn
+from ..services import events, ledger as svc
+from ..services import selfshare
 
 router = APIRouter(prefix="/api/ledger", tags=["ledger"])
 calories_router = APIRouter(prefix="/api/calories", tags=["calories"])
@@ -81,7 +84,7 @@ def recognize_calorie(body: CalorieRecognizeIn, background_tasks: BackgroundTask
     result = svc.recognize_calorie(body.account_id, body.image_url, body.hint)
     missed = result.pop("missed", None) or []
     if missed:
-        background_tasks.add_task(svc.backfill_food_web, missed)
+        background_tasks.add_task(svc.backfill_food_web, body.account_id, missed)
     return result
 
 
@@ -146,3 +149,16 @@ def delete_correction(kind: str, correction_id: str, account_id: str):
 @calories_router.get("")
 def list_calories(account_id: str, date: str | None = None):
     return svc.list_calories(account_id, date)
+
+
+@calories_router.get("/events")
+async def calorie_events(account_id: str):
+    """SSE：后台联网入库完成（staging_ready）/ 共建库治理（staging_updated）时推给在线页面，
+    前端收到即刷新列表——升级提示自动出现，不用再干等手动刷新（见 docs/BUG记录.md BUG-023）。"""
+    conn = get_conn()
+    selfshare.require_account(conn, account_id)
+    return StreamingResponse(
+        events.stream(account_id),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

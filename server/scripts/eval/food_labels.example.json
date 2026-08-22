@@ -1,0 +1,20 @@
+{
+  "_说明": "端到端标注格式示例：复制本文件为 food_labels.json 后填写。照片放 scripts/eval/foods/；grams 用厨房秤称的真实值（可食部分）；kcal 可不填（按标注名查表折算口径）；tolerance_pct 预留，评测脚本暂按统一口径算 MAE",
+  "cases": [
+    {
+      "image": "foods/rice_bowl.jpg",
+      "hint": "一碗米饭",
+      "items": [
+        { "name": "米饭", "grams": 180, "kcal": 212 }
+      ]
+    },
+    {
+      "image": "foods/breakfast.jpg",
+      "hint": "",
+      "items": [
+        { "name": "鸡蛋", "grams": 55 },
+        { "name": "馒头", "grams": 100 }
+      ]
+    }
+  ]
+}

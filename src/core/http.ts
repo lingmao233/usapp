@@ -1,7 +1,7 @@
 /** 平台无关的 HTTP 抽象：web 用 fetch 实现，小程序用 Taro.request 实现。 */
 
 export interface HttpOptions {
-  method?: "GET" | "POST" | "PUT" | "DELETE"
+  method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"
   body?: unknown
 }
 

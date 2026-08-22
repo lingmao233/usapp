@@ -9,6 +9,7 @@
 import json
 import logging
 import re
+import statistics
 import uuid
 from datetime import date, datetime
 from pathlib import Path
@@ -322,17 +323,19 @@ def recognize_calorie(account_id: str, image_url: str, hint: str = "") -> dict:
     """
     conn = get_conn()
     _require_account(conn, account_id)
-    # 用户历史克数纠正 → 注入识别 prompt 做校准（越估越准的来源）
+    # 用户历史克数纠正 → 注入识别 prompt 做校准（越估越准的来源）：
+    # 同类样例 + 用户级系统偏置（AI 历来高/低估多少，校准所有克数）
     try:
         result = ai.recognize_food(str(_image_path(image_url)), hint or "",
-                                   calibration=_gram_corrections(conn, account_id))
+                                   calibration=_gram_corrections(conn, account_id),
+                                   bias=_gram_bias(conn, account_id))
     except RuntimeError as exc:
         # 视觉调用失败（参数被厂商拒/网络等）：如实 502，别谎报成"未配置"
         raise HTTPException(status_code=502, detail="视觉模型调用失败，请稍后重试或手动录入") from exc
     if result is None:
         raise HTTPException(status_code=400, detail="未配置视觉模型，请手动录入")
     items = []
-    missed: list[tuple[str, str]] = []  # 本地全不中的菜名：后台联网入库用
+    missed: list[tuple[str, str, float | None]] = []  # 本地全不中的菜名：后台联网入库用（含模型隐含单价，供交叉校验）
     # 图片型 RAG：单菜品照片先以图搜图——命中历史确认过的图就直接复用上次的菜名/品牌/单价
     raw_items = [r for r in (result.get("items") or []) if isinstance(r, dict)]
     rag_hit = _image_rag_recall(conn, account_id, image_url) if len(raw_items) == 1 else None
@@ -340,6 +343,7 @@ def recognize_calorie(account_id: str, image_url: str, hint: str = "") -> dict:
         name = str(raw.get("name") or "").strip()[:50]
         if not name:
             continue
+        raw_name = name  # 模型原始输出（纠正应用前）：改回原名时精准撤销纠正（防震荡）
         name = _apply_name_correction(conn, account_id, name)  # 用户纠正过的名字直接用纠正名
         brand = str(raw.get("brand") or "").strip()[:30]
         try:
@@ -350,6 +354,11 @@ def recognize_calorie(account_id: str, image_url: str, hint: str = "") -> dict:
             model_kcal = float(raw.get("kcal"))
         except (TypeError, ValueError):
             model_kcal = 0.0
+        try:  # 模型自报把握度（0-1）：前端把人工确认引导到最没把握的项
+            conf = float(raw.get("confidence"))
+            confidence = round(max(0.0, min(1.0, conf)), 2)
+        except (TypeError, ValueError):
+            confidence = None
         if rag_hit and rag_hit.get("kcal_per_100g") and grams > 0:
             # 以图搜图命中：菜名/品牌/单价全部复用历史确认值（同物同价，识别抖动归零）
             name = rag_hit["name"]
@@ -367,8 +376,11 @@ def recognize_calorie(account_id: str, image_url: str, hint: str = "") -> dict:
             kcal_per_100g = hit["kcal_per_100g"] if hit else None
         if kcal <= 0 and grams > 0:
             # 查表（含 staging）未命中 → 联网兜底移出热路径（新品首次按模型估值标 model），
-            # 菜名收集起来由后台任务联网入库——与用户是否确认入账解耦，下次识别直接命中
-            missed.append((name, brand))
+            # 菜名收集起来由后台任务联网入库——与用户是否确认入账解耦，下次识别直接命中；
+            # 模型隐含单价一并带走，入库前与联网值交叉校验（BUG-022：错值不得落全局库）
+            missed.append((name, brand,
+                           round(model_kcal * 100 / grams, 1)
+                           if (model_kcal > 0 and grams > 0) else None))
         if kcal <= 0 and model_kcal > 0:  # 全不中回退模型估值
             # 物理上限钳制：隐含单价超 1000 kcal/100g（纯油 ~900）必是估飞了，钳回上限
             if grams > 0 and model_kcal * 100 / grams > nutrition.MAX_KCAL_PER_100G:
@@ -377,6 +389,10 @@ def recognize_calorie(account_id: str, image_url: str, hint: str = "") -> dict:
         if kcal <= 0:
             continue
         item = {"name": name, "kcal": kcal, "source": source}
+        if confidence is not None:
+            item["confidence"] = confidence
+        if raw_name and raw_name != name:
+            item["raw_name"] = raw_name  # 纠正生效时留底原识别名：改回原名=撤销纠正
         if brand:
             item["brand"] = brand
         if staging_id is not None:
@@ -411,26 +427,42 @@ def recognize_calorie(account_id: str, image_url: str, hint: str = "") -> dict:
     return {"entry": _calorie_dict(row), "missed": missed}
 
 
-def backfill_food_web(missed: list[tuple[str, str]]) -> None:
+def backfill_food_web(account_id: str, missed: list[tuple[str, str, float | None]]) -> None:
     """识别热路径未命中的菜名：后台联网查询并写入共建库（与用户是否确认入账解耦；
     即使估值被丢弃也会入库）。下次识别同食物直接命中 staging，不再等待。
 
     并发 3 路（每个菜名一次联网调用实测约 20-25s，串行太慢）；每个菜名经任务层
-    run_task 执行（失败重试 2 次、指数退坡、落库状态可查）。
+    run_task 执行（失败重试 2 次、指数退坡、落库状态可查）。入库前过 sanitize_web_value
+    清洗（BUG-022：联网错值差模型 10 倍以上/饮品超先验 → 不落库）；入库成功经 SSE
+    通知该账号在线页面刷新（升级提示自动出现，不用等用户手动刷新）。
     """
     from concurrent.futures import ThreadPoolExecutor
 
-    from . import tasks
+    from . import events, tasks
 
-    def _one(name: str, brand: str) -> None:
+    def _one(name: str, brand: str, model_per_100g: float | None) -> None:
         def _run() -> None:
-            web = ai.web_search_food(name, brand)
-            if web is not None:
-                nutrition.upsert_staging_web(name, web, brand)
+            web = ai.web_search_food(name, brand, model_per_100g)  # 估值随行：搜索端交叉自检用
+            if web is None:
+                return
+            staged = nutrition.upsert_staging_web(name, web, brand, model_per_100g)
+            if staged is None:
+                logger.warning("联网值未通过合理性校验，不落共建库：%s → %s kcal/100g"
+                               "（模型参考 %s）", name, web.get("kcal_per_100g"), model_per_100g)
+                return
+            if staged.get("note") or web.get("basis"):
+                logger.info("联网值入库：%s %s kcal/100g（%s）%s", name, staged["kcal_per_100g"],
+                            web.get("basis") or "口径未说明", staged.get("note", ""))
+            events.publish(account_id, {
+                "type": "staging_ready",
+                "name": name,
+                "kcal_per_100g": staged["kcal_per_100g"],
+            })
+
         tasks.run_task("food_web_backfill", name, _run, retries=2)
 
     with ThreadPoolExecutor(max_workers=3) as pool:
-        list(pool.map(lambda nb: _one(*nb), missed))
+        list(pool.map(lambda nbm: _one(*nbm), missed))
 
 
 def _calorie_linkage(conn, account_id: str) -> dict | None:
@@ -563,6 +595,29 @@ def _gram_corrections(conn, account_id: str, limit: int = 8) -> list[dict]:
     return out
 
 
+def _gram_bias(conn, account_id: str, min_samples: int = 3,
+               window: int = 30, cap: float = 1.5) -> float | None:
+    """用户级克数偏置：历史纠正里 用户实际/模型估计 的中位比值（钳到 [1/cap, cap]）。
+
+    「这个用户的 AI 历来低估 20%」这种系统偏置比逐条样例更稳——样例只帮同类食物，
+    偏置帮所有食物。样本 <min_samples 或钳到边界（离谱单点）不给，宁缺毋滥。
+    """
+    rows = conn.execute(
+        """SELECT ai_grams, user_grams FROM calorie_gram_corrections
+           WHERE account_id = ? ORDER BY rowid DESC LIMIT ?""",
+        (account_id, window),
+    ).fetchall()
+    ratios = [float(r["user_grams"]) / float(r["ai_grams"])
+              for r in rows if r["ai_grams"] and float(r["ai_grams"]) > 0
+              and r["user_grams"] and float(r["user_grams"]) > 0]
+    if len(ratios) < min_samples:
+        return None
+    med = statistics.median(ratios)
+    if med > cap or med < 1 / cap:
+        return None  # 中位都离谱说明纠正数据本身不可信（用户乱改/单位错）
+    return round(med, 2)
+
+
 def _apply_name_correction(conn, account_id: str, name: str) -> str:
     """识别出的菜名先过一遍该账号的名字纠正表：有纠正记录就用纠正名（最新一条生效）。"""
     row = conn.execute(
@@ -571,6 +626,39 @@ def _apply_name_correction(conn, account_id: str, name: str) -> str:
         (account_id, name),
     ).fetchone()
     return row["corrected_name"] if row else name
+
+
+def _record_name_correction(conn, account_id: str, entry_id: str, item: dict,
+                            new_name: str) -> None:
+    """改名时写名字纠正（BUG-021：防「红茶↔火腿」双向震荡）。
+
+    - 纠正记在「模型会怎么叫它」上：条目带 raw_name（被纠正过的识别结果）时记
+      raw_name→new（模型下次还输出 raw_name），否则记当前名→new
+    - 改回 raw_name = 撤销纠正：删除正向行 (raw_name→当前名)，不新增反向行——
+      反向行 (火腿→红茶) 会让真火腿照片也变成红茶，正是震荡根源
+    - 其他改名先清反向行 (new→key) 再插入，保证任何时刻一个名字对只有一个纠正方向
+    """
+    cur = str(item.get("name") or "")[:50]
+    raw_name = str(item.get("raw_name") or "").strip()[:50]
+    key = raw_name if (raw_name and raw_name != new_name) else cur
+    if new_name == raw_name:
+        conn.execute(
+            """DELETE FROM calorie_name_corrections
+               WHERE account_id = ? AND recognized_name = ? AND corrected_name = ?""",
+            (account_id, raw_name, cur),
+        )
+        return
+    conn.execute(
+        """DELETE FROM calorie_name_corrections
+           WHERE account_id = ? AND recognized_name = ? AND corrected_name = ?""",
+        (account_id, new_name, key),
+    )
+    conn.execute(
+        """INSERT INTO calorie_name_corrections
+           (id, account_id, recognized_name, corrected_name, entry_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (uuid.uuid4().hex[:12], account_id, key, new_name, entry_id, _now()),
+    )
 
 
 def lookup_food(account_id: str, name: str, grams=None) -> dict:
@@ -624,20 +712,18 @@ def update_calorie_item(entry_id: str, account_id: str, index: int,
             raise HTTPException(status_code=400, detail="菜名不能为空")
         renamed = new_name != item.get("name")
         if renamed:
-            conn.execute(
-                """INSERT INTO calorie_name_corrections
-                   (id, account_id, recognized_name, corrected_name, entry_id, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (uuid.uuid4().hex[:12], account_id, str(item.get("name") or "")[:50],
-                 new_name, entry_id, _now()),
-            )
+            # 留底本次改名前的名字（模型原始输出或最早的录入名）：之后再改回它 = 撤销纠正
+            item.setdefault("raw_name", str(item.get("name") or "")[:50])
+            _record_name_correction(conn, account_id, entry_id, item, new_name)
         brand = str(item.get("brand") or "")
         g0 = float(item.get("grams") or 0)
         hit = nutrition.match(new_name, brand)
         web = ai.web_search_food(new_name, brand) if hit is None and g0 > 0 else None
-        if hit is not None or web is not None:
-            # 查表/共建库命中，或联网搜到（写入 staging 标待认可）：按新单价×克数重算
-            per100 = float(hit["kcal_per_100g"]) if hit is not None else float(web["kcal_per_100g"])
+        # 联网值同样过合理性清洗（此处无模型参照可用——旧条目的热量是旧食物的，只做品类先验）
+        staged = nutrition.upsert_staging_web(new_name, web, brand) if web is not None else None
+        if hit is not None or staged is not None:
+            # 查表/共建库命中，或联网搜到（清洗通过写入 staging 标待认可）：按新单价×克数重算
+            per100 = float(hit["kcal_per_100g"]) if hit is not None else staged["kcal_per_100g"]
             if hit is not None:
                 item["source"] = hit["source"]
                 if hit.get("staging_id") is not None:
@@ -646,7 +732,7 @@ def update_calorie_item(entry_id: str, account_id: str, index: int,
                     item.pop("staging_id", None)
             else:
                 item["source"] = "web_pending"
-                item["staging_id"] = nutrition.upsert_staging_web(new_name, web, brand)
+                item["staging_id"] = staged["staging_id"]
             item["kcal_per_100g"] = per100
             if g0 > 0:
                 item["kcal"] = round(per100 * g0 / 100)

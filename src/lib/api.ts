@@ -107,6 +107,7 @@ export type {
   Session,
   SharingCategory,
   SharingItem,
+  StagingRow,
   TodayPlan,
   TreeholeChatResp,
   TreeholeCitation,

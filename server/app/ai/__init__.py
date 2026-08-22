@@ -410,19 +410,28 @@ def recognize_receipt(image_path: str) -> list[dict] | None:
         return None
 
 
-def recognize_food(image_path: str, hint: str = "", calibration: list[dict] | None = None) -> dict | None:
+def recognize_food(image_path: str, hint: str = "", calibration: list[dict] | None = None,
+                   bias: float | None = None) -> dict | None:
     """食物照片识别 + 热量估算：开关与降级口径同 recognize_receipt。
 
     hint 为用户补充描述（如"红烧肉一碗约 300g"），经 FOOD_PROMPT 的 {hint} 占位注入，可空。
     calibration 为该用户的历史克数纠正（[{name, ai_grams, user_grams}]），注入 prompt
     让分量估计贴合用户习惯（在线校准，非模型微调）。
+    bias 为全局偏置系数（用户实际/模型估计的中位比值，服务层按历史纠正算出）：
+    模型对这个用户历来的系统性高/低估，校准所有克数——比逐条样例更稳的用户级信号。
     """
     if not settings.vision_enabled:
         return None
-    calib_text = "\n".join(
+    calib_lines = [
         f"- {c['name']}：你上次估 {c['ai_grams']:g}g，用户实际是 {c['user_grams']:g}g"
         for c in calibration or []
-    ) or "（无）"
+    ]
+    if bias and abs(bias - 1) >= 0.05:  # 偏离 <5% 视为噪声不注入
+        direction = "偏低" if bias > 1 else "偏高"
+        calib_lines.append(
+            f"- 整体校准：你历来的分量估计比该用户实际平均{direction}约 {abs(bias - 1):.0%}，"
+            f"本次所有克数按 ×{bias:.2f} 修正")
+    calib_text = "\n".join(calib_lines) or "（无）"
     prompt = FOOD_PROMPT.format(hint=hint, calibration=calib_text)
     try:
         result = vision.vision_json(
@@ -460,8 +469,14 @@ def _opt_macro(raw) -> float | None:
     return v if 0 <= v <= 100 else None
 
 
-def web_search_food(name: str, brand: str = "") -> dict | None:
-    """联网查食物每 100g 营养（营养共建信任管线的核验/兜底数据源）。
+def web_search_food(name: str, brand: str = "", model_per_100g=None) -> dict | None:
+    """联网查食物每 100 单位营养（营养共建信任管线的核验/兜底数据源）。
+
+    可靠性在源头掐（BUG-022 复盘：搜「红茶」回干茶叶 294 kcal/100g，形态/单位错配）：
+    - form_hint：饮品名（结尾词判断，与 nutrition.drink 先验同源）明确要求「即饮/冲泡后」
+      口径，不给干料/原料值
+    - model_per_100g：视觉模型对该食物的隐含单价，作为交叉自检锚点写进 prompt——
+      让模型在回答前自己发现「差 10 倍 = 形态/单位搞错了」（入库前的 sanitize 仍兜底）
 
     联网通道二选一：树洞配置是 Kimi 系（moonshot/kimi.com）→ 内置 $web_search 真联网
     （回声协议见 llm.chat_messages）；否则回退 LLM_* + enable_search（阿里百炼写法，
@@ -472,8 +487,27 @@ def web_search_food(name: str, brand: str = "") -> dict | None:
     brand = (brand or "").strip()
     if not name or not settings.web_search_enabled:
         return None
+    # 延迟导入：nutrition 依赖 ai 门面，模块级会成环；form 先验与匹配层同源（一个词表）
+    from ..services.nutrition import is_drink_name
+
     brand_hint = f"品牌：{brand}。" if brand else ""
-    prompt = WEB_SEARCH_FOOD_PROMPT.format(name=name, brand_hint=brand_hint)
+    form_hint = ("口径提示：这是用户喝的饮品，请查「冲泡后/即饮」液体的值（每 100ml≈100g），"
+                 "不要给干茶叶/粉剂/浓缩原料的值。" if is_drink_name(name) else "")
+    try:
+        ref = float(model_per_100g) if model_per_100g is not None else None
+    except (TypeError, ValueError):
+        ref = None
+    if ref and ref > 0:
+        ref_hint = f"\n背景参考：视觉模型对这项食物的估算约为 {ref:g} kcal/100（仅供核对，不作为数据来源）。"
+        ref_check = (f"视觉模型对它的估算约为 {ref:g} kcal/100；你查到的值若与它差 10 倍以上，"
+                     "先怀疑自己搞错了形态或单位，重新检索确认后再回答")
+    else:
+        ref_hint = ""
+        ref_check = ("你查到的值若明显超出同类食物的常识量级（如饮品查出三位数 kcal/100），"
+                     "先怀疑形态或单位搞错，重新检索确认后再回答")
+    prompt = WEB_SEARCH_FOOD_PROMPT.format(name=name, brand_hint=brand_hint,
+                                           form_hint=form_hint, ref_hint=ref_hint,
+                                           ref_check=ref_check)
     try:
         cfg = settings.treehole_llm()
         kimi_hosted = "moonshot" in cfg[1] or "kimi.com" in cfg[1]
@@ -501,6 +535,7 @@ def web_search_food(name: str, brand: str = "") -> dict | None:
             "protein_per_100g": _opt_macro(result.get("protein_per_100g")),
             "fat_per_100g": _opt_macro(result.get("fat_per_100g")),
             "cho_per_100g": _opt_macro(result.get("cho_per_100g")),
+            "basis": str(result.get("basis") or "").strip()[:60],  # 口径说明（观测/审计用）
         }
     except Exception as exc:  # noqa: BLE001
         # 联网核验失败不算 degraded：off/失败都有明确降级路径（模型估值/待核实），不污染任务层标记

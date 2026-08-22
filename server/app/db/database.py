@@ -367,6 +367,9 @@ CREATE TABLE IF NOT EXISTS food_nutrition_staging (
     verified INTEGER NOT NULL DEFAULT 0,
     approvals INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
+    updated_by TEXT NOT NULL DEFAULT '',    -- 最后编辑者（管理面板改值/软删时记，审计用）
+    updated_at TEXT,                        -- 最后编辑时间
+    deleted INTEGER NOT NULL DEFAULT 0,     -- 软删标记（管理面板删除；匹配/回填/认可自动跳过）
     UNIQUE(name, brand)
 );
 
@@ -461,6 +464,7 @@ def init_db() -> None:
     _migrate_nudges_plan_date()
     _migrate_food_brand()
     _migrate_staging_approvals_fk()
+    _migrate_staging_admin()
     _migrate_treehole_image_and_custom_persona()
     _seed_food_nutrition()
     get_conn().commit()
@@ -514,6 +518,23 @@ def _migrate_staging_approvals_fk() -> None:
            WHERE EXISTS (SELECT 1 FROM food_nutrition_staging s WHERE s.id = o.staging_id)"""
     )
     conn.execute("DROP TABLE food_staging_approvals_old")
+
+
+def _migrate_staging_admin() -> None:
+    """存量迁移：food_nutrition_staging 补管理面板三列（updated_by/updated_at/deleted）。
+
+    加列走 ALTER（不动唯一约束，无需重建表）；新库由 SCHEMA 直接建对。
+    """
+    conn = get_conn()
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(food_nutrition_staging)")]
+    if not cols:
+        return
+    if "deleted" not in cols:
+        conn.execute("ALTER TABLE food_nutrition_staging ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0")
+    if "updated_by" not in cols:
+        conn.execute("ALTER TABLE food_nutrition_staging ADD COLUMN updated_by TEXT NOT NULL DEFAULT ''")
+    if "updated_at" not in cols:
+        conn.execute("ALTER TABLE food_nutrition_staging ADD COLUMN updated_at TEXT")
 
 
 def _seed_food_nutrition() -> None:

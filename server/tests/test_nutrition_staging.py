@@ -89,14 +89,17 @@ def test_web_search_food_off_by_default() -> None:
 
 
 def test_web_search_food_fake_stub(monkeypatch) -> None:
-    """开关 on：返回确定性桩；空名搜不到返回 None。"""
+    """开关 on：返回确定性桩；空名搜不到返回 None。新参数 model_per_100g（搜索端交叉
+    自检锚点）不影响桩值。"""
     monkeypatch.setattr(settings, "LLM_WEB_SEARCH", "on")
     assert ai.web_search_food("苹果") == {
         "kcal_per_100g": 200.0,
         "protein_per_100g": 8.0,
         "fat_per_100g": 5.0,
         "cho_per_100g": 30.0,
+        "basis": "确定性桩固定口径",
     }
+    assert ai.web_search_food("苹果", "富士", model_per_100g=52.0) is not None
     assert ai.web_search_food("  ") is None
 
 
@@ -125,7 +128,7 @@ def test_web_search_food_kimi_channel(monkeypatch) -> None:
 def test_add_food_verify_pass(env, monkeypatch) -> None:
     """手动添加：响应即 staging 行（verified=false 待核验）；后台核验与联网值差 ≤50% → verified=1。"""
     uid = _new_user(env)
-    monkeypatch.setattr(ai, "web_search_food", lambda name, brand="": _web(110.0))
+    monkeypatch.setattr(ai, "web_search_food", lambda name, brand="", model_per_100g=None: _web(110.0))
     r = env.post("/api/nutrition/foods", json={
         "account_id": uid, "name": "共建燕麦奶", "kcal_per_100g": 100, "protein_per_100g": 1.2})
     assert r.status_code == 200, r.text
@@ -142,7 +145,7 @@ def test_add_food_verify_pass(env, monkeypatch) -> None:
 def test_add_food_verify_outlier_stays_unverified(env, monkeypatch) -> None:
     """离谱核验：联网值与用户值差 >50% → verified 保持 0（待核实），不晋升为可信数据。"""
     uid = _new_user(env)
-    monkeypatch.setattr(ai, "web_search_food", lambda name, brand="": _web(300.0))  # 用户填 100，差 200%
+    monkeypatch.setattr(ai, "web_search_food", lambda name, brand="", model_per_100g=None: _web(300.0))  # 用户填 100，差 200%
     r = env.post("/api/nutrition/foods", json={
         "account_id": uid, "name": "共建能量胶", "kcal_per_100g": 100})
     assert r.status_code == 200, r.text
@@ -153,7 +156,7 @@ def test_add_food_verify_outlier_stays_unverified(env, monkeypatch) -> None:
 def test_add_food_verify_skipped_when_search_fails(env, monkeypatch) -> None:
     """搜索失败/未开启（返回 None）：不核验，verified 保持 0，添加本身不受影响。"""
     uid = _new_user(env)
-    monkeypatch.setattr(ai, "web_search_food", lambda name, brand="": None)
+    monkeypatch.setattr(ai, "web_search_food", lambda name, brand="", model_per_100g=None: None)
     r = env.post("/api/nutrition/foods", json={
         "account_id": uid, "name": "共建魔芋面", "kcal_per_100g": 20})
     assert r.status_code == 200, r.text
@@ -163,7 +166,7 @@ def test_add_food_verify_skipped_when_search_fails(env, monkeypatch) -> None:
 def test_add_food_duplicate_name_idempotent(env, monkeypatch) -> None:
     """同名重复添加幂等：不插新行，created=false 返回已存在行。"""
     uid = _new_user(env)
-    monkeypatch.setattr(ai, "web_search_food", lambda name, brand="": _web(100.0))
+    monkeypatch.setattr(ai, "web_search_food", lambda name, brand="", model_per_100g=None: _web(100.0))
     r1 = env.post("/api/nutrition/foods", json={
         "account_id": uid, "name": "共建魔芋面", "kcal_per_100g": 20})
     assert r1.json()["created"] is True
@@ -244,7 +247,7 @@ def test_recognize_web_hit_writes_staging(env, monkeypatch) -> None:
     估值被丢弃也不影响入库；下次识别同食物直接命中 staging。"""
     uid = _new_user(env)
     _patch_recognize(monkeypatch, "共建神秘果", 150, 999)
-    monkeypatch.setattr(ai, "web_search_food", lambda name, brand="": _web(120.0))
+    monkeypatch.setattr(ai, "web_search_food", lambda name, brand="", model_per_100g=None: _web(120.0))
     r = env.post("/api/calories/recognize", json={"account_id": uid, "image_url": _image_url()})
     assert r.status_code == 200, r.text
     item = r.json()["entry"]["items"][0]
@@ -267,7 +270,7 @@ def test_recognize_web_miss_falls_back_to_model(env, monkeypatch) -> None:
     """查表未命中 + 联网搜不到（None）：回退模型估值 source=model，不写 staging。"""
     uid = _new_user(env)
     _patch_recognize(monkeypatch, "共建幻影菜", 100, 456)
-    monkeypatch.setattr(ai, "web_search_food", lambda name, brand="": None)
+    monkeypatch.setattr(ai, "web_search_food", lambda name, brand="", model_per_100g=None: None)
     r = env.post("/api/calories/recognize", json={"account_id": uid, "image_url": _image_url()})
     assert r.status_code == 200, r.text
     item = r.json()["entry"]["items"][0]
@@ -290,7 +293,7 @@ def test_confirm_counts_approval_dedup_same_account(env, monkeypatch) -> None:
     """确认入账计认可：同一账号对同一食物确认多次只计一次（去重表兜底）。"""
     uid = _new_user(env)
     _patch_recognize(monkeypatch, "共建能量棒", 100, 1)
-    monkeypatch.setattr(ai, "web_search_food", lambda name, brand="": _web(250.0))
+    monkeypatch.setattr(ai, "web_search_food", lambda name, brand="", model_per_100g=None: _web(250.0))
     _recognize_and_confirm(env, uid)
     row = _staging_row("共建能量棒")
     assert row["approvals"] == 1
@@ -307,7 +310,7 @@ def test_confirm_counts_approval_dedup_same_account(env, monkeypatch) -> None:
 def test_promote_after_three_approvals(env, monkeypatch) -> None:
     """3 个不同账号认可 → 晋升正式 food_nutrition（含 embedding），staging 行与认可记录删除。"""
     _patch_recognize(monkeypatch, "共建花生酱", 100, 1)
-    monkeypatch.setattr(ai, "web_search_food", lambda name, brand="": _web(600.0))
+    monkeypatch.setattr(ai, "web_search_food", lambda name, brand="", model_per_100g=None: _web(600.0))
     uids = [_new_user(env) for _ in range(3)]
     _recognize_and_confirm(env, uids[0])
     assert _staging_row("共建花生酱")["approvals"] == 1

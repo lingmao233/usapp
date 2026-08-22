@@ -3,6 +3,7 @@ import {
   api,
   type CalorieEntry,
   type ExerciseEquiv,
+  type StagingRow,
 } from "@/lib/api"
 import ImagePicker, { type PickedImage } from "@/components/ImagePicker"
 
@@ -84,6 +85,162 @@ function CorrectionsPanel({ accountId }: { accountId: string }) {
           <p className="text-xs text-stone-400 leading-relaxed mt-1">
             这些纠正会让识别越来越贴合你；纠正错了删掉即可，下次识别不再生效。
           </p>
+        </div>
+      )}
+    </section>
+  )
+}
+
+/** 共建食物库管理面板：查/改/删 staging 行（错值治理——红茶 294 这类可在这里清掉） */
+function StagingPanel({ accountId, onChanged }: { accountId: string; onChanged: () => void }) {
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState("")
+  const [showDeleted, setShowDeleted] = useState(false)
+  const [rows, setRows] = useState<StagingRow[]>([])
+  const [total, setTotal] = useState(0)
+  const [msg, setMsg] = useState("")
+  const [editing, setEditing] = useState<number | null>(null)
+  const [editText, setEditText] = useState("")
+
+  async function loadRows() {
+    try {
+      const res = await api.listStaging(accountId, query.trim() || undefined, showDeleted)
+      setRows(res.items)
+      setTotal(res.total)
+    } catch {
+      /* 静默 */
+    }
+  }
+
+  async function saveKcal(row: StagingRow) {
+    const v = Number(editText)
+    setEditing(null)
+    if (!Number.isFinite(v) || v <= 0 || v > 1000 || v === row.kcal_per_100g) return
+    try {
+      await api.updateStaging(row.id, accountId, { kcal_per_100g: Math.round(v * 10) / 10 })
+      setMsg(`已把「${row.name}」改为 ${Math.round(v * 10) / 10} kcal/100g`)
+      await loadRows()
+      onChanged()
+    } catch {
+      setMsg("没改成，再试一次")
+    }
+  }
+
+  async function toggleVerified(row: StagingRow) {
+    try {
+      await api.updateStaging(row.id, accountId, { verified: !row.verified })
+      await loadRows()
+    } catch {
+      setMsg("没改成，再试一次")
+    }
+  }
+
+  async function remove(row: StagingRow) {
+    if (!window.confirm(`删掉「${row.name}」？删后识别不再用它计价（可重新收录）`)) return
+    try {
+      await api.deleteStaging(row.id, accountId)
+      setMsg(`已删「${row.name}」`)
+      await loadRows()
+      onChanged()
+    } catch {
+      setMsg("删除失败，再试一次")
+    }
+  }
+
+  return (
+    <section className="mt-4">
+      <button
+        className="us-btn-ghost text-xs"
+        onClick={() => {
+          const next = !open
+          setOpen(next)
+          if (next) loadRows()
+        }}
+      >
+        {open ? "收起" : "共建食物库管理"}（{open ? "" : "错值可在这里改/删"}）
+      </button>
+      {open && (
+        <div className="mt-3 flex flex-col gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            <input
+              className="us-input flex-1 min-w-32 !py-1 !text-xs"
+              placeholder="搜食物名/品牌…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.nativeEvent.isComposing) void loadRows()
+              }}
+            />
+            <button className="us-btn-ghost text-xs" onClick={() => void loadRows()}>搜索</button>
+            <label className="text-xs text-stone-500 flex items-center gap-1">
+              <input type="checkbox" checked={showDeleted}
+                     onChange={(e) => setShowDeleted(e.target.checked)} />
+              含已删
+            </label>
+            <span className="text-xs text-stone-400">共 {total} 条</span>
+          </div>
+          {rows.length === 0 && (
+            <p className="text-xs text-stone-400">
+              {query ? "没搜到" : "共建库还是空的（识别联网入库/手动收录会进来）"}
+            </p>
+          )}
+          {rows.map((r) => (
+            <div key={r.id} className="flex items-center justify-between text-sm border-b border-[#264653]/8 pb-2 gap-2 flex-wrap">
+              <span className="text-stone-600">
+                {r.brand ? `${r.brand}·` : ""}{r.name}
+                {editing === r.id ? (
+                  <input
+                    autoFocus
+                    type="number"
+                    className="us-input w-20 !py-0.5 !text-xs ml-1"
+                    value={editText}
+                    onChange={(e) => setEditText(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.nativeEvent.isComposing) void saveKcal(r)
+                      if (e.key === "Escape") setEditing(null)
+                    }}
+                    onBlur={() => void saveKcal(r)}
+                  />
+                ) : (
+                  <button
+                    className="ml-1 underline decoration-dotted underline-offset-4 hover:text-[#264653] transition-colors"
+                    title="点我改每 100g 热量（错值治理）"
+                    onClick={() => {
+                      setEditing(r.id)
+                      setEditText(String(r.kcal_per_100g))
+                    }}
+                  >
+                    {r.kcal_per_100g} kcal/100g
+                  </button>
+                )}
+                <span className={`ml-1 text-[10px] border rounded px-1 align-middle ${
+                  r.deleted ? "text-stone-400 border-stone-300"
+                  : r.verified ? "text-[#2A9D8F] border-[#2A9D8F]/40"
+                  : "text-[#F4A261] border-[#F4A261]/50"}`}>
+                  {r.deleted ? "已删" : r.verified ? "已核验" : "待核实"}
+                </span>
+                <span className="ml-1 text-[10px] text-stone-400">
+                  {r.source === "web" ? "联网" : r.source === "user" ? "手填" : r.source}
+                  {r.approvals ? ` · 认可 ${r.approvals}` : ""}
+                </span>
+              </span>
+              <span className="flex gap-2 shrink-0">
+                <button className="us-btn-ghost text-xs text-stone-400"
+                        onClick={() => void toggleVerified(r)}>
+                  {r.verified ? "标待核实" : "标已核验"}
+                </button>
+                <button className="us-btn-ghost text-xs text-stone-400"
+                        onClick={() => void remove(r)}>
+                  删除
+                </button>
+              </span>
+            </div>
+          ))}
+          <p className="text-xs text-stone-400 leading-relaxed mt-1">
+            共建库是全局共享的：联网搜到的错值（比如把 kJ 当成 kcal 的离谱数）在这里改掉或删掉，
+            大家的识别都会跟着准。
+          </p>
+          {msg && <p className="text-xs text-stone-500">{msg}</p>}
         </div>
       )}
     </section>
@@ -202,7 +359,7 @@ function GramsField({ grams, onSave }: { grams: number; onSave: (g: number) => P
 /** 待确认卡（识别时已落库 pending 行，带 id；确认时只回传 id + 可改的总热量/备注） */
 interface PendingEntry {
   id: string
-  items: { name: string; kcal: number; brand?: string; grams?: number; source?: string; staging_id?: number }[]
+  items: { name: string; kcal: number; brand?: string; grams?: number; source?: string; staging_id?: number; confidence?: number }[]
   total: string
   note: string
   exercise_equiv: Record<string, ExerciseEquiv>
@@ -283,6 +440,16 @@ export default function Calories({ accountId }: { accountId: string }) {
     load()
   }, [load])
 
+  // SSE：后台联网入库完成（staging_ready）/ 共建库治理（staging_updated）→ 自动刷新列表，
+  // 「有查表数据，更新为 X kcal」的提示跟着出现，不用再干等手动刷新
+  useEffect(() => {
+    const es = new EventSource(`/api/calories/events?account_id=${accountId}`)
+    es.onmessage = () => {
+      if (day === todayLocal()) void load()
+    }
+    return () => es.close()
+  }, [accountId, day, load])
+
   async function handleRecognize() {
     if (!image) return
     setRecBusy(true)
@@ -299,6 +466,7 @@ export default function Calories({ accountId }: { accountId: string }) {
           grams: x.grams,
           source: x.source,
           staging_id: x.staging_id,
+          confidence: x.confidence,
         })),
         total: String(Math.round(entry.total_kcal || 0)),
         note: entry.note || hint.trim(),
@@ -342,9 +510,16 @@ export default function Calories({ accountId }: { accountId: string }) {
     }
   }
 
-  /** 丢弃：pending 行已在服务端，按 id 删掉（热量没有删除端点，丢弃仅本地移除卡片） */
-  function handleDiscard() {
+  /** 丢弃：pending 行已在服务端落库，按 id 真删（不留僵尸行） */
+  async function handleDiscard() {
+    const id = pending?.id
     setPending(null)
+    if (!id) return
+    try {
+      await api.deleteCalorie(id, accountId)
+    } catch {
+      /* 删不掉下次刷新也不会再出现在待确认卡（本地已移除），失败静默即可 */
+    }
   }
 
   /** 待确认卡改条目（克数/名字）：服务端重算后整卡刷新（kcal/总热量/运动等效都变） */
@@ -362,6 +537,7 @@ export default function Calories({ accountId }: { accountId: string }) {
           grams: x.grams,
           source: x.source,
           staging_id: x.staging_id,
+          confidence: x.confidence,
         })),
         total: String(Math.round(e.total_kcal)),
         note: e.note || pending.note,
@@ -555,6 +731,14 @@ export default function Calories({ accountId }: { accountId: string }) {
                           图库
                         </span>
                       )}
+                      {x.confidence != null && x.confidence < 0.5 && (
+                        <span
+                          className="ml-1 text-[10px] text-[#E76F51] border border-[#E76F51]/50 rounded px-1 align-middle"
+                          title="这项把握不大：点名字/克数帮忙改一下，改完下次更准"
+                        >
+                          没把握
+                        </span>
+                      )}
                     </span>
                     <span className="text-stone-500">{Math.round(x.kcal)} kcal</span>
                   </div>
@@ -684,13 +868,21 @@ export default function Calories({ accountId }: { accountId: string }) {
 
       {/* 当日记录：可翻历史（← 前一天 / 后一天 →），每条可删 */}
       <section>
-        <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
           <h3 className="us-serif text-lg">{day === today ? "今日记录" : "当日记录"}</h3>
           <div className="flex items-center gap-2 text-sm">
             <button className="us-btn-ghost text-xs" onClick={() => setDay(shiftDay(day, -1))}>
               ← 前一天
             </button>
-            <span className="text-stone-500 text-xs">{day}</span>
+            <input
+              type="date"
+              className="us-input !py-0.5 !text-xs w-36"
+              value={day}
+              max={today}
+              onChange={(e) => {
+                if (e.target.value) setDay(e.target.value)
+              }}
+            />
             <button
               className="us-btn-ghost text-xs"
               disabled={day >= today}
@@ -698,6 +890,11 @@ export default function Calories({ accountId }: { accountId: string }) {
             >
               后一天 →
             </button>
+            {day !== today && (
+              <button className="us-btn-ghost text-xs" onClick={() => setDay(today)}>
+                回到今天
+              </button>
+            )}
           </div>
         </div>
         {entries.length === 0 ? (
@@ -722,7 +919,8 @@ export default function Calories({ accountId }: { accountId: string }) {
                       : e.note || "手动录入"}
                   </span>
                   <button
-                    className="us-btn-ghost text-xs text-stone-400 shrink-0"
+                    className="us-btn-ghost text-xs text-stone-500 hover:text-[#e25563] shrink-0"
+                    title="删掉这条记录（历史某天录错也能删）"
                     onClick={async () => {
                       if (!window.confirm("删掉这条热量记录？")) return
                       try {
@@ -766,11 +964,11 @@ export default function Calories({ accountId }: { accountId: string }) {
                         )}
                         {x.upgrade && (
                           <button
-                            className="ml-1 text-[10px] text-[#F4A261] border border-[#F4A261]/60 rounded px-1 align-middle hover:bg-[#F4A261]/10 transition-colors"
+                            className="ml-1 text-[10px] font-medium text-[#E76F51] bg-[#F4A261]/15 border border-[#F4A261]/70 rounded px-1.5 py-0.5 align-middle hover:bg-[#F4A261]/30 transition-colors"
                             title={`联网查到了：每 100g 约 ${x.upgrade.kcal_per_100g} kcal，点击按它重算`}
                             onClick={() => handleEntryPatch(e.id, xi, { name: x.name })}
                           >
-                            有查表数据，更新为 {x.upgrade.kcal} kcal
+                            ↻ 联网数据：更新为 {x.upgrade.kcal} kcal
                           </button>
                         )}
                       </p>
@@ -787,6 +985,12 @@ export default function Calories({ accountId }: { accountId: string }) {
           </div>
         )}
       </section>
+
+      {/* 识别纠正记录（纠正错了可删）+ 共建食物库管理（错值治理），默认收起 */}
+      <div className="mt-2">
+        <CorrectionsPanel accountId={accountId} />
+        <StagingPanel accountId={accountId} onChanged={() => void load()} />
+      </div>
     </div>
   )
 }

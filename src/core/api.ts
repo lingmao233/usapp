@@ -26,6 +26,7 @@ import type {
   SharingCategory,
   SharingItem,
   StagedFood,
+  StagingRow,
   TodayPlan,
   TreeholeChatResp,
   TreeholeMessage,
@@ -549,6 +550,29 @@ export function createApi(req: RequestFn) {
       req<{ food: StagedFood; created: boolean; message?: string }>("/api/nutrition/foods", {
         method: "POST",
         body: { account_id, name, kcal_per_100g, ...macros, brand: brand || undefined },
+      }),
+
+    // staging 管理面板：列表（搜索/分页；includeDeleted 连软删行一起看）
+    listStaging: (account_id: string, query?: string, includeDeleted?: boolean) =>
+      req<{ items: StagingRow[]; total: number; page: number; page_size: number }>(
+        `/api/nutrition/staging?account_id=${account_id}${query ? `&query=${encodeURIComponent(query)}` : ""}${includeDeleted ? "&include_deleted=true" : ""}`,
+      ),
+
+    // 改 staging 行（传什么改什么；软删行改完自动复活），用于治理错值
+    updateStaging: (
+      id: number,
+      account_id: string,
+      patch: { name?: string; brand?: string; kcal_per_100g?: number; verified?: boolean },
+    ) =>
+      req<{ food: StagingRow }>(`/api/nutrition/staging/${id}`, {
+        method: "PATCH",
+        body: { account_id, ...patch },
+      }),
+
+    // 软删 staging 行（匹配/回填/认可即刻跳过；之后再添加同名会以新值复活）
+    deleteStaging: (id: number, account_id: string) =>
+      req<{ status?: string }>(`/api/nutrition/staging/${id}?account_id=${account_id}`, {
+        method: "DELETE",
       }),
 
     /* ---------------- 情绪树洞（账号级私密对话） ---------------- */

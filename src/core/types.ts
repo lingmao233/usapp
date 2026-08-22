@@ -255,6 +255,10 @@ export interface CalorieItem {
   brand?: string
   /** 模型估计的分量（克），识别时才有 */
   grams?: number
+  /** 视觉模型原始识别名（纠正生效/改名时留底）：改回它 = 撤销纠正（防双向震荡） */
+  raw_name?: string
+  /** 模型自报把握度 0-1（菜名+分量综合）：前端对低置信项提示用户重点确认 */
+  confidence?: number
   /** 每 100g 热量（查表/联网命中时落库）：改克数按它重算 kcal，不用重新匹配 */
   kcal_per_100g?: number
   /** table=查《中国食物成分表》计算，model=模型估值兜底，
@@ -337,6 +341,15 @@ export interface StagedFood {
   verified?: boolean
   approvals?: number
   created_at?: string
+}
+
+/** staging 管理面板行：StagedFood + 治理字段（软删/审计）。deleted=true 的行不参与匹配 */
+export interface StagingRow extends StagedFood {
+  brand?: string
+  deleted?: boolean
+  /** 最后编辑者账号与时间（治理留痕） */
+  updated_by?: string
+  updated_at?: string | null
 }
 
 /* ---------------- Self 共享与朋友任务（类别 × 圈子开关） ---------------- */

@@ -228,18 +228,20 @@ def receipt_recognition() -> list[dict]:
 
 
 def food_recognition() -> dict:
-    """确定性食物识别桩：固定一餐（米饭 + 番茄炒蛋），kcal 为该项总热量估算（查表兜底值）。"""
+    """确定性食物识别桩：固定一餐（米饭 + 番茄炒蛋），kcal 为该项总热量估算（查表兜底值）。
+    confidence 为把握度（0-1），让前端低置信标注/落库路径可测。"""
     return {
         "items": [
-            {"name": "米饭", "brand": "", "grams": 200, "kcal": 232},
-            {"name": "番茄炒蛋", "brand": "", "grams": 150, "kcal": 170},
+            {"name": "米饭", "brand": "", "grams": 200, "kcal": 232, "confidence": 0.9},
+            {"name": "番茄炒蛋", "brand": "", "grams": 150, "kcal": 170, "confidence": 0.45},
         ],
         "note": "确定性桩固定估算结果，仅供参考",
     }
 
 
-def web_search_food(name: str, brand: str = "") -> dict | None:
-    """确定性联网搜索桩：名字非空就返回固定营养值（每 100g），空名视为搜不到。brand 不影响桩值。"""
+def web_search_food(name: str, brand: str = "", model_per_100g=None) -> dict | None:
+    """确定性联网搜索桩：名字非空就返回固定营养值（每 100g），空名视为搜不到。
+    brand/model_per_100g（搜索端交叉自检锚点）不影响桩值。"""
     if not (name or "").strip():
         return None
     return {
@@ -247,6 +249,7 @@ def web_search_food(name: str, brand: str = "") -> dict | None:
         "protein_per_100g": 8.0,
         "fat_per_100g": 5.0,
         "cho_per_100g": 30.0,
+        "basis": "确定性桩固定口径",
     }
 
 
@@ -451,7 +454,7 @@ def _daily_plan(goal_type, framework, context):
                       str(context.get("progress") or ""))
 
 
-def _web_search_food(name: str, brand: str = "") -> dict | None:
+def _web_search_food(name: str, brand: str = "", model_per_100g=None) -> dict | None:
     """保留门面开关语义：LLM_WEB_SEARCH≠on 直接 None（不联网降级），on 才给确定性桩。"""
     if not settings.web_search_enabled:
         return None

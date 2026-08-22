@@ -351,7 +351,7 @@ def test_rename_item_web_hit_then_kept_estimate(client: TestClient, monkeypatch)
     entry = client.post("/api/calories/recognize", json={
         "account_id": uid, "image_url": _image_url()}).json()["entry"]
 
-    monkeypatch.setattr(ai, "web_search_food", lambda name, brand="": {
+    monkeypatch.setattr(ai, "web_search_food", lambda name, brand="", model_per_100g=None: {
         "kcal_per_100g": 50.0, "protein_per_100g": None, "fat_per_100g": None, "cho_per_100g": None})
     r = client.put(f"/api/calories/{entry['id']}/items",
                    json={"account_id": uid, "index": 0, "name": "神秘果昔"})
@@ -363,7 +363,7 @@ def test_rename_item_web_hit_then_kept_estimate(client: TestClient, monkeypatch)
     ).fetchone()["verified"] == 1
 
     # 联网搜不到（None）：保留当前热量标 model，单价标记移除
-    monkeypatch.setattr(ai, "web_search_food", lambda name, brand="": None)
+    monkeypatch.setattr(ai, "web_search_food", lambda name, brand="", model_per_100g=None: None)
     r = client.put(f"/api/calories/{entry['id']}/items",
                    json={"account_id": uid, "index": 0, "name": "幻影料理"})
     item = r.json()["entry"]["items"][0]
@@ -487,7 +487,7 @@ def test_model_estimate_upgrade_after_web_backfill(client: TestClient, monkeypat
     uid = _new_user(client, "升级圈")
     monkeypatch.setattr(ai, "recognize_food", lambda path, hint="", **_: {
         "items": [{"name": "神秘果汁", "grams": 250, "kcal": 1412}], "note": ""})
-    monkeypatch.setattr(ai, "web_search_food", lambda name, brand="": {
+    monkeypatch.setattr(ai, "web_search_food", lambda name, brand="", model_per_100g=None: {
         "kcal_per_100g": 45.0, "protein_per_100g": None, "fat_per_100g": None, "cho_per_100g": None})
     r = client.post("/api/calories/recognize", json={
         "account_id": uid, "image_url": _image_url()})
