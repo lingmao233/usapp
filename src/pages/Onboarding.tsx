@@ -4,6 +4,7 @@ import {
   loadAccountId,
   saveAccount,
   saveAccountId,
+  saveDeviceToken,
   type AccountInfo,
 } from "@/lib/api"
 import CodeCustomizer from "@/components/CodeCustomizer"
@@ -60,8 +61,9 @@ export default function Onboarding({ onDone }: { onDone: (a: AccountInfo) => voi
   const [busy, setBusy] = useState(false)
   const [forced, setForced] = useState<{ code: string; account: AccountInfo } | null>(null)
 
-  /** 登录态落盘（recovery_code 是一次性的，不持久化） */
+  /** 登录态落盘（recovery_code 是一次性的，不持久化；device_token 是树洞等隐私接口的凭证） */
   function persist(a: AccountInfo) {
+    saveDeviceToken(a.device_token)
     saveAccountId(a.account_id)
     saveAccount({
       account_id: a.account_id,

@@ -90,6 +90,7 @@ export function createApi(req: RequestFn) {
         persona_preset: string
         persona_custom: string
         recovery_code: string | null
+        device_token?: string
       }>("/api/circles", {
         method: "POST",
         body: {
@@ -585,14 +586,23 @@ export function createApi(req: RequestFn) {
         body: { account_id, message, image_url: image_url || undefined },
       }),
 
-    // 历史原文（服务端包 {items}，正序全量）
-    treeholeHistory: async (account_id: string) =>
-      unwrapList<TreeholeMessage>(
-        await req<TreeholeMessage[] | { items?: TreeholeMessage[] }>(
-          `/api/treehole/history?account_id=${account_id}`,
-        ),
-        "items",
-      ),
+    // 历史原文（服务端包 {items, has_more}，正序；before_created=当前最早一条的
+    // created_at 翻更早一页，has_more 标记还有更早）。裸数组是旧形状，has_more 按 false 兜底
+    treeholeHistory: async (
+      account_id: string,
+      opts?: { limit?: number; before_created?: string },
+    ) => {
+      const qs = new URLSearchParams({ account_id })
+      if (opts?.limit) qs.set("limit", String(opts.limit))
+      if (opts?.before_created) qs.set("before_created", opts.before_created)
+      const res = await req<
+        TreeholeMessage[] | { items?: TreeholeMessage[]; has_more?: boolean }
+      >(`/api/treehole/history?${qs.toString()}`)
+      return {
+        items: unwrapList<TreeholeMessage>(res, "items"),
+        has_more: (res as { has_more?: boolean } | null)?.has_more === true,
+      }
+    },
 
     // 清空对话（L0 原文 + 会话状态；L1/L2 记忆与人设卡保留）
     treeholeClear: (account_id: string) =>

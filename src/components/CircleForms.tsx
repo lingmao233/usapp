@@ -11,6 +11,8 @@ export interface CircleJoined {
   nickname: string
   circle_name: string
   invite_code: string
+  /** 建圈/入圈响应附带的设备令牌（进圈时随 session 落盘） */
+  device_token?: string
 }
 
 export interface CircleCreated extends CircleJoined {
@@ -51,6 +53,7 @@ export function CreateCircleForm({
         nickname: circle.nickname,
         circle_name: circle.name,
         invite_code: circle.invite_code,
+        device_token: circle.device_token,
       })
     } catch (e) {
       setError(e instanceof Error ? e.message : "出了点问题，再试一次")
@@ -119,6 +122,7 @@ export function JoinCircleForm({
         nickname: res.nickname,
         circle_name: res.circle_name,
         invite_code: res.invite_code,
+        device_token: res.device_token,
       })
     } catch (e) {
       setError(e instanceof Error ? e.message : "出了点问题，再试一次")
@@ -196,5 +200,6 @@ export function toSession(c: CircleJoined, account: {
     account_id: account.account_id,
     username: account.username,
     has_password: account.has_password,
+    device_token: c.device_token,
   }
 }

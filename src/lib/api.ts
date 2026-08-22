@@ -76,6 +76,11 @@ export function saveDeviceToken(token: string | undefined | null) {
   if (token) localStorage.setItem("us_device_token", token)
 }
 
+/** 登出时清设备令牌（重新登录会签发新的；过渡期无令牌请求由服务端放行） */
+export function clearDeviceToken() {
+  localStorage.removeItem("us_device_token")
+}
+
 /** 树洞流式对话（web 专用，不走 createApi 工厂）：SSE 逐段回调 onDelta，
  * done 事件带最终整包（reply 为权威全文，调用方以此对齐展示与落库口径）。
  * 任何阶段失败抛 Error--调用方可回退到整包 treeholeChat。 */

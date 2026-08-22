@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react"
 import {
   api,
+  saveDeviceToken,
   saveSession,
   type AccountCircle,
   type AccountInfo,
@@ -188,6 +189,7 @@ export default function Landing({
                   accountId={account.account_id}
                   defaultNickname={account.nickname}
                   onCreated={(c) => {
+                    saveDeviceToken(c.device_token)
                     const s = toSession(c, account)
                     saveSession(s)
                     setCreatedSession(s)
@@ -202,6 +204,7 @@ export default function Landing({
                 <JoinCircleForm
                   accountId={account.account_id}
                   onJoined={(c) => {
+                    saveDeviceToken(c.device_token)
                     const s = toSession(c, account)
                     saveSession(s)
                     onEnterCircle(s)

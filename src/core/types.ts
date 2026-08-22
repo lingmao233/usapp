@@ -10,6 +10,8 @@ export interface Session {
   account_id?: string
   username?: string
   has_password?: boolean
+  /** 服务端签发的设备令牌（建圈/入圈响应附带，进圈时顺带落盘） */
+  device_token?: string
 }
 
 /** 登录态账号信息：auth.register/login/reset 的响应结构；
@@ -20,6 +22,8 @@ export interface AccountInfo {
   nickname: string
   has_password: boolean
   recovery_code?: string | null
+  /** 服务端签发的设备令牌（树洞等隐私接口的 Bearer 凭证，登录时落盘） */
+  device_token?: string
 }
 
 /** 圈子（人格系统）：persona_custom 非空时优先于 persona_preset，圈与圈独立 */
@@ -406,16 +410,18 @@ export interface FriendTasksResp {
 
 /* ---------------- 情绪树洞（账号级私密对话，与圈子正交） ---------------- */
 
-/** 树洞消息（L0 原文，history 接口正序全量返回） */
+/** 树洞消息（L0 原文，history 接口正序返回；citations/tools 随消息持久化带出） */
 export interface TreeholeMessage {
   id: string
   role: "user" | "assistant"
   content: string
   image_url?: string
+  citations?: TreeholeCitation[]
+  tools?: string[]
   created_at: string
 }
 
-/** 回复依据：检索命中的碎片/原子记忆摘抄（仅当轮 chat 响应返回，history 没有） */
+/** 回复依据：检索命中的碎片/原子记忆摘抄（chat 当轮响应与 history 持久化行都有） */
 export interface TreeholeCitation {
   kind: string
   id: string

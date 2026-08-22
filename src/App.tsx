@@ -4,9 +4,11 @@ import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "reac
 import {
   clearAccount,
   clearAccountId,
+  clearDeviceToken,
   clearSession,
   loadAccount,
   loadSession,
+  saveDeviceToken,
   saveSession,
   type AccountInfo,
   type Session,
@@ -98,11 +100,14 @@ export default function App() {
     clearSession()
     clearAccountId()
     clearAccount()
+    clearDeviceToken()
     setSession(null)
     setAccount(null)
   }
 
   function enterCircle(s: Session) {
+    // 建圈/入圈响应带的设备令牌随 session 汇到这里落盘（树洞等隐私接口的 Bearer 凭证）
+    saveDeviceToken(s.device_token)
     saveSession(s)
     setSession(s)
     navigate("/wall")
