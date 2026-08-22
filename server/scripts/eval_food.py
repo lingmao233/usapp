@@ -10,9 +10,14 @@
    度量名字准确率 / 克数 MAE / 热量误差。把照片放 scripts/eval/foods/、按
    scripts/eval/food_labels.json 格式标注（厨房秤称真实克数），零标注时跳过并给指引。
 
+标注半自动生成（--label，需视觉配置，烧 token）：扫 scripts/eval/foods/ 逐张识别，
+把识别出的 name/grams/kcal 预填成 food_labels.json 模板（标 TODO 用厨房秤核对），
+人工核对完就能跑 --e2e 出数。
+
 跑法：
     cd server && .venv-mac/bin/python scripts/eval_food.py             # 匹配层（离线）
     .venv-mac/bin/python scripts/eval_food.py --compare                # 看历史趋势
+    .venv-mac/bin/python scripts/eval_food.py --label                  # 生成标注模板（烧 token）
     .venv-mac/bin/python scripts/eval_food.py --e2e                    # 端到端（烧 token）
 
 结果追加到 scripts/eval/food_match_history.jsonl（改 prompt / 加别名后必跑对比）。
@@ -129,14 +134,39 @@ def run_match_layer() -> dict:
 EVAL_ACCOUNT = "eval_food_001"
 
 
-def run_e2e() -> dict | None:
+def _load_label_cases() -> list[dict] | None:
+    """读 food_labels.json：文档形状是 {cases: [...]}，顶层裸数组也兼容（旧手写）。"""
     labels_path = os.path.join(EVAL_DIR, "food_labels.json")
     if not os.path.isfile(labels_path):
         print("端到端跳过：没有标注文件。指引：照片放 scripts/eval/foods/，"
-              "再按 scripts/eval/food_labels.example.json 建 food_labels.json"
-              "（items 里 grams 用厨房秤称的真实值）。")
+              "先跑 --label 生成标注模板（或按 food_labels.example.json 手写），"
+              "items 里 grams 用厨房秤称的真实值。")
         return None
     labels = json.loads(open(labels_path, encoding="utf-8").read())
+    if isinstance(labels, dict):
+        return labels.get("cases") or []
+    return labels
+
+
+def _cleanup_eval(conn, used_ids: list[str]) -> None:
+    """清评测痕迹：pending 记录 + eval_ 前缀临时图（账号保留复用）。"""
+    from app.config import settings
+
+    for eid in used_ids:
+        conn.execute("DELETE FROM calorie_entries WHERE id = ?", (eid,))
+    for f in os.listdir(settings.upload_dir):
+        if f.startswith("eval_"):
+            try:
+                os.remove(settings.upload_dir / f)
+            except OSError:
+                pass
+    conn.commit()
+
+
+def run_e2e() -> dict | None:
+    labels = _load_label_cases()
+    if labels is None:
+        return None
     if not settings_vision_ready():
         print("端到端跳过：未配置视觉模型（VISION_*）。")
         return None
@@ -178,16 +208,7 @@ def run_e2e() -> dict | None:
         exp_kcal = sum(i.get("kcal", 0) for i in exp_items)
         if exp_kcal > 0:
             kcal_errs.append(abs(result["entry"]["total_kcal"] - exp_kcal) / exp_kcal)
-    # 清理：评测产生的 pending 记录与临时图（账号保留复用）
-    for eid in used_ids:
-        conn.execute("DELETE FROM calorie_entries WHERE id = ?", (eid,))
-    for f in os.listdir(settings.upload_dir):
-        if f.startswith("eval_"):
-            try:
-                os.remove(settings.upload_dir / f)
-            except OSError:
-                pass
-    conn.commit()
+    _cleanup_eval(conn, used_ids)
     metrics = {
         "cases": cases,
         "name_acc": round(sum(name_acc) / len(name_acc), 3) if name_acc else None,
@@ -197,6 +218,55 @@ def run_e2e() -> dict | None:
     print(f"端到端评测：{cases} 例，名字准确率 {metrics['name_acc']}，"
           f"克数 MAE {metrics['grams_mae']}，热量 MAE {metrics['kcal_mae']}")
     return metrics
+
+
+def run_label() -> None:
+    """半自动标注（交接清单 #4）：扫 foods/ 逐张识别，预填 food_labels.json 模板。
+    已有标注文件时不覆盖，写 food_labels.json.new 由人工比对合并。"""
+    foods_dir = os.path.join(EVAL_DIR, "foods")
+    images = sorted(f for f in os.listdir(foods_dir)
+                    if f.lower().endswith((".jpg", ".jpeg", ".png"))) if os.path.isdir(foods_dir) else []
+    if not images:
+        print(f"没有可标注的照片：把拍好的食物图放进 {foods_dir} 再跑 --label。")
+        return
+    if not settings_vision_ready():
+        print("标注跳过：未配置视觉模型（VISION_*）。")
+        return
+    from app.config import settings
+    from app.services import ledger as svc
+
+    conn = get_conn()
+    conn.execute(
+        "INSERT OR IGNORE INTO accounts (id, nickname, created_at) VALUES (?, '评测账号', ?)",
+        (EVAL_ACCOUNT, datetime.now().isoformat(timespec="seconds")))
+    conn.commit()
+    cases, used_ids = [], []
+    for i, name in enumerate(images):
+        stem = f"eval_{datetime.now().strftime('%H%M%S')}_{i}"
+        shutil.copy(os.path.join(foods_dir, name), settings.upload_dir / f"{stem}.jpg")
+        try:
+            result = svc.recognize_calorie(EVAL_ACCOUNT, f"/api/uploads/{stem}.jpg", "")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  识别失败 {name}：{exc}")
+            continue
+        used_ids.append(result["entry"]["id"])
+        items = [{"name": it["name"], "grams": it.get("grams"), "kcal": it.get("kcal")}
+                 for it in result["entry"]["items"]]
+        cases.append({"image": f"foods/{name}", "hint": "", "items": items})
+        print(f"  {name} → {items}")
+    _cleanup_eval(conn, used_ids)
+
+    template = {
+        "_说明": "TODO 用厨房秤核对每项 grams/kcal（识别值只是预填，hint 可补拍照时的话）；"
+                 "核对完跑 eval_food.py --e2e 出名字准确率/克数 MAE/热量 MAE",
+        "cases": cases,
+    }
+    labels_path = os.path.join(EVAL_DIR, "food_labels.json")
+    out_path = labels_path if not os.path.isfile(labels_path) else labels_path + ".new"
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(template, f, ensure_ascii=False, indent=2)
+    print(f"标注模板已生成：{out_path}（{len(cases)} 例）"
+          + ("；已有标注文件未动" if out_path != labels_path else ""))
 
 
 def settings_vision_ready() -> bool:
@@ -225,10 +295,15 @@ def show_history() -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="食物识别管线评测")
     parser.add_argument("--e2e", action="store_true", help="端到端（需视觉配置+标注照片）")
+    parser.add_argument("--label", action="store_true",
+                        help="半自动标注：扫 foods/ 逐张识别预填 food_labels.json 模板（需视觉配置，烧 token）")
     parser.add_argument("--compare", action="store_true", help="只看历史趋势")
     args = parser.parse_args()
     if args.compare:
         show_history()
+        return
+    if args.label:
+        run_label()
         return
     if args.e2e:
         m = run_e2e()
