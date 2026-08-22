@@ -2,7 +2,8 @@
  *
  * chat 是整包响应 {reply, citations, tools_used, intent, guardrail}：
  * - guardrail=true 的干预话术由后端给，前端照常当普通回复展示；
- * - citations（依据摘抄）只随当轮响应返回，history 接口没有——本地挂在当条消息上展示；
+ * - citations（依据摘抄）与 tools（查了什么工具）随消息持久化，history 直接带出
+ *   （当轮流式到达时先挂本地消息，刷新后从 history 读回）；
  * - tools_used 是工具名数组，映射成中文标签提示「刚刚查了：…」。
  */
 import { useEffect, useRef, useState } from "react"
@@ -22,12 +23,6 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet"
-
-/** 当轮响应附带的展示信息（citations/tools 不落 history，只挂本地消息） */
-type LocalMsg = TreeholeMessage & {
-  citations?: TreeholeCitation[]
-  tools?: string[]
-}
 
 /** 图片消息的气泡文本：剥掉服务端追加的 [图片：…] caption 标记（内部记忆用，不展示） */
 function visibleContent(m: TreeholeMessage): string {
@@ -212,7 +207,9 @@ function PersonaSheet({
 }
 
 export default function TreeHole({ accountId }: { accountId: string }) {
-  const [messages, setMessages] = useState<LocalMsg[]>([])
+  const [messages, setMessages] = useState<TreeholeMessage[]>([])
+  const [hasMore, setHasMore] = useState(false)
+  const [loadingEarlier, setLoadingEarlier] = useState(false)
   const [persona, setPersona] = useState<TreeholePersona | null>(null)
   const [draft, setDraft] = useState("")
   const [image, setImage] = useState<PreparedImage | null>(null)
@@ -222,12 +219,17 @@ export default function TreeHole({ accountId }: { accountId: string }) {
   const [personaOpen, setPersonaOpen] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
+  // 置底判定用：尾部消息 id 的上次值（「加载更早」是头部前置，不该触发滚底）
+  const lastIdRef = useRef<string | null>(null)
 
   // 历史原文 + 人设卡并行拉取（互不影响，各自失败各自静默）
   useEffect(() => {
     api
       .treeholeHistory(accountId)
-      .then(setMessages)
+      .then((r) => {
+        setMessages(r.items)
+        setHasMore(r.has_more)
+      })
       .catch(() => {})
     api
       .getTreeholePersona(accountId)
@@ -235,9 +237,39 @@ export default function TreeHole({ accountId }: { accountId: string }) {
       .catch(() => {})
   }, [accountId])
 
-  // 新消息/发送态变化时滚到底部
+  // 「加载更早」：以当前最早一条的 created_at 为游标翻上一页，前置进消息流。
+  // 页面滚动的是 window（无内部滚动容器）：前置前记下 scrollY/scrollHeight，
+  // 渲染后补偿高度差，视线停在原来那条消息上
+  async function loadEarlier() {
+    if (loadingEarlier || messages.length === 0) return
+    setLoadingEarlier(true)
+    const prevHeight = document.documentElement.scrollHeight
+    const prevScroll = window.scrollY
+    try {
+      const r = await api.treeholeHistory(accountId, {
+        before_created: messages[0].created_at,
+      })
+      setMessages((ms) => [...r.items, ...ms])
+      setHasMore(r.has_more)
+      requestAnimationFrame(() => {
+        window.scrollTo(0, prevScroll + document.documentElement.scrollHeight - prevHeight)
+      })
+    } catch {
+      /* 翻页失败保持现状，可重试 */
+    } finally {
+      setLoadingEarlier(false)
+    }
+  }
+
+  // 尾部新增（发送/收到回复）或发送态变化时滚到底部
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" })
+    const last = messages[messages.length - 1]
+    const lastId = last?.id ?? null
+    const grewAtTail = lastId !== null && lastId !== lastIdRef.current
+    lastIdRef.current = lastId
+    if (grewAtTail || sending) {
+      bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" })
+    }
   }, [messages.length, sending])
 
   async function onPickImage(f: File | null) {
@@ -330,6 +362,7 @@ export default function TreeHole({ accountId }: { accountId: string }) {
     try {
       await api.treeholeClear(accountId)
       setMessages([])
+      setHasMore(false)
     } catch {
       /* 失败保持现状，用户可重试 */
     }
@@ -382,6 +415,15 @@ export default function TreeHole({ accountId }: { accountId: string }) {
 
       {/* 消息流：用户右 / AI 左 */}
       <div className="flex-1 flex flex-col gap-3 py-4">
+        {hasMore && messages.length > 0 && (
+          <button
+            className="us-btn-ghost text-xs self-center border border-[#264653]/15"
+            onClick={loadEarlier}
+            disabled={loadingEarlier}
+          >
+            {loadingEarlier ? "加载中…" : "加载更早"}
+          </button>
+        )}
         {messages.length === 0 && !sending ? (
           <div className="text-center text-stone-400 py-16 leading-loose">
             <p className="us-serif text-xl text-[#264653] mb-2">这里只有你和 TA</p>

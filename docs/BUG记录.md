@@ -343,3 +343,13 @@
 - **修复**：4 处改为 `from . import tokens`（2 行修复）；顺带 `.gitignore` 补 `server/data/device_secret`（设备令牌 HMAC 密钥文件，防泄漏进库）。
 - **验证**：工作区修复后全量 pytest 271/271 通过（12.9s）。
 - **预防**：**提交前必须跑一次全量测试基线**（坏 import 这类全量红灯十几秒就能拦住）；同包模块引用统一 `from . import xxx`，新增 services 子模块时先确认目标模块的包路径再写相对导入。
+
+## BUG-026 树洞 history 分页把最新一条挤掉：has_more 截断方向写反
+
+- **日期**：2026-08-23
+- **环境**：本机 dev（代码问题；分页功能在 87bab44 引入但未上线，生产未爆）
+- **现象**：新增分页测试 `test_history_pagination` 首跑即红：账号 5 条消息取 `limit=3`，第一页返回第 1~3 条而不是最新的第 3~5 条——**只要历史超过一页，最新一条消息（通常是刚收到的回复）就不会出现在第一页**，且「加载更早」翻页窗口整体错位一格。
+- **根因**：`treehole/service.py history()` 多取 1 条探测 has_more（`list_messages(limit=page_size+1)` 返回最新 N+1 条正序），判定后用 `items[:page_size]` 截断——多取的探测行在**头部（更早侧）**，正确写法是 `items[-page_size:]` 保留最新 page_size 条；`[:page_size]` 恰好把探测行留下、把最新一条挤掉。交接文档明确要求补分页测试钉住行为，测试第一跑就抓住了。
+- **修复**：截断改为 `items[-page_size:]`（保留最新页，丢弃头部探测行）。
+- **验证**：`test_history_pagination`（5 条 limit=3：第一页=最新 3 条+has_more，游标翻页=剩余 2 条+无更早，两页拼接与全量一致）与 `test_history_default_page_size`（205 条默认页=200 条+has_more）通过；全量 pytest 见当日验证记录。
+- **预防**：**「多取 1 条判边界」的分页模式，截断方向必须对着探测行的位置**（探测行在头则留尾、在尾则留头）——这类 off-by-one 光看代码难以察觉，分页接口上线前必须有「两页拼接=全量」的等价性测试。

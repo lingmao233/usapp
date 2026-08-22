@@ -590,3 +590,91 @@ def test_langmem_temperature_shares_llm_resolver(monkeypatch) -> None:
         monkeypatch.setattr(s, "LLM_TEMPERATURE", "")
     monkeypatch.setattr(langmem_ext, "_manager", None)
     assert langmem_ext._build_llm().temperature == 0.7  # 未配置回退默认，两侧行为一致
+
+
+# ---------- 2026-08-23 追加：history 分页 / citations·tools 持久化 / L1 去重 ----------
+
+
+def _insert_msg(conn: sqlite3.Connection, account_id: str, msg_id: str,
+                content: str, created_at: str) -> None:
+    """直插 L0 消息（不经 chat 管线）：分页测试需要可控且互不相同的 created_at
+    （_now 只有秒精度，同秒行会撞 before_created 的严格小于游标）。"""
+    conn.execute(
+        "INSERT INTO treehole_messages (id, account_id, role, content, image_url,"
+        " citations, tools, created_at) VALUES (?, ?, 'user', ?, '', '[]', '[]', ?)",
+        (msg_id, account_id, content, created_at))
+
+
+def test_history_pagination(client: TestClient) -> None:
+    """分页：limit 控制页大小（服务端多取 1 条判 has_more），before_created 游标翻更早，
+    两页拼接与全量一致（正序）。"""
+    acc = _new_account(client, "分页圈")
+    conn = _db()
+    for i in range(5):
+        _insert_msg(conn, acc["account_id"], f"pg{i}", f"第 {i} 条",
+                    f"2026-01-01T12:00:0{i}")
+    conn.commit()
+
+    page1 = client.get("/api/treehole/history",
+                       params={"account_id": acc["account_id"], "limit": 3}).json()
+    assert [m["id"] for m in page1["items"]] == ["pg2", "pg3", "pg4"]
+    assert page1["has_more"] is True
+
+    page2 = client.get(
+        "/api/treehole/history",
+        params={"account_id": acc["account_id"], "limit": 3,
+                "before_created": page1["items"][0]["created_at"]}).json()
+    assert [m["id"] for m in page2["items"]] == ["pg0", "pg1"]
+    assert page2["has_more"] is False
+
+
+def test_history_default_page_size(client: TestClient) -> None:
+    """默认页大小 200（上限 500）：超过截到 200 并标 has_more（前端首屏依赖）。"""
+    acc = _new_account(client, "默认页圈")
+    conn = _db()
+    for i in range(205):
+        _insert_msg(conn, acc["account_id"], f"big{i}", f"第 {i} 条",
+                    f"2026-01-02T12:{i // 60:02d}:{i % 60:02d}")
+    conn.commit()
+    page = client.get("/api/treehole/history",
+                      params={"account_id": acc["account_id"]}).json()
+    assert len(page["items"]) == 200 and page["has_more"] is True
+
+
+def test_history_persists_citations_tools(client: TestClient) -> None:
+    """citations/tools 随 L0 持久化：chat 后从 history 读回（刷新页面不再丢依据）。"""
+    acc = _new_account(client, "依据圈")
+    frag = client.post("/api/fragments", json={
+        "circle_id": acc["circle_id"], "user_id": acc["user_id"],
+        "content": "想去冰岛看极光", "visibility": "private"})
+    assert frag.status_code == 200, frag.text
+    frag_id = frag.json()["id"]
+
+    reply = _chat(client, acc["account_id"], "我最近想去冰岛")
+    assert any(c["id"] == frag_id for c in reply["citations"])  # 当轮召回自己的碎片
+
+    r = client.post("/api/ledger/expenses", json={
+        "account_id": acc["account_id"], "amount_fen": 3550,
+        "category": "餐饮", "merchant": "麦当劳"})
+    assert r.status_code == 200, r.text
+    assert "query_ledger" in _chat(
+        client, acc["account_id"], "我这个月花了多少钱？")["tools_used"]
+
+    items = client.get("/api/treehole/history",
+                       params={"account_id": acc["account_id"]}).json()["items"]
+    assistants = [m for m in items if m["role"] == "assistant"]
+    assert any(c["id"] == frag_id for m in assistants for c in m["citations"])
+    assert any("query_ledger" in m["tools"] for m in assistants)
+
+
+def test_l1_dedup_repeat_vent(client: TestClient) -> None:
+    """L1 去重：同一句倾诉发两遍，同文本原子只落一条（insert_atoms 精确文本 +
+    余弦 ≥0.9 跳过；fakes 桩确定性保证两轮文本/嵌入一致）。"""
+    acc = _new_account(client, "去重圈")
+    msg = "我喜欢吃辣的火锅"
+    _chat(client, acc["account_id"], msg)
+    _chat(client, acc["account_id"], msg)
+
+    contents = [a["content"] for a in layers.list_atoms(acc["account_id"])]
+    assert contents, "第一轮就该抽出原子"
+    assert len(contents) == len(set(contents)), f"重复倾诉不该落重复原子：{contents}"

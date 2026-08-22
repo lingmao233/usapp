@@ -91,11 +91,13 @@ def chat_stream(body: ChatIn, background_tasks: BackgroundTasks, authorization: 
 
 
 @router.get("/history")
-def get_history(account_id: str, authorization: str | None = Header(None)):
-    """分页：limit 默认 200，before_created（取当前最早一条的 created_at）翻更早；
-    has_more 标记还有更早。citations/tools 已随行带出。"""
+def get_history(account_id: str, limit: int | None = None,
+                before_created: str | None = None,
+                authorization: str | None = Header(None)):
+    """分页：limit 默认 200（上限 500），before_created（取当前最早一条的 created_at）
+    翻更早；has_more 标记还有更早。citations/tools 已随行带出。"""
     _authorized(account_id, authorization)
-    return svc.history(account_id)
+    return svc.history(account_id, limit=limit, before_created=before_created)
 
 
 @router.delete("/history")

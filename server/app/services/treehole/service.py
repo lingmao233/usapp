@@ -107,7 +107,8 @@ def history(account_id: str, limit: int | None = None,
                                  before_created=before_created)
     has_more = len(items) > page_size
     if has_more:
-        items = items[:page_size]
+        # 多取的 1 条在头部（更早侧的探测行）；当前页保留最新 page_size 条
+        items = items[-page_size:]
     return {"items": items, "has_more": has_more}
 
 
