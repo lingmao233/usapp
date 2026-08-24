@@ -80,3 +80,25 @@ def test_embedding_explicit_overrides_fallback(monkeypatch) -> None:
     finally:
         monkeypatch.undo()
         _reload()
+
+
+def test_embedding_full_url_config(monkeypatch) -> None:
+    """完整端点 URL 优先：EMBEDDING_URL 非空直接用（代码不拼接）；
+    留空时从 EMBEDDING_BASE_URL 推导惯例路径（兼容老配置，vision 模型推导 multimodal 子路径）。"""
+    monkeypatch.setenv("EMBEDDING_BASE_URL", "https://emb.example/v1/")
+    monkeypatch.setenv("EMBEDDING_URL", "")
+    monkeypatch.setenv("EMBEDDING_MODEL", "text-embedding-test")
+    _reload()
+    try:
+        assert config.settings.EMBEDDING_URL == "https://emb.example/v1/embeddings"
+
+        monkeypatch.setenv("EMBEDDING_MODEL", "doubao-embedding-vision-test")
+        _reload()
+        assert config.settings.EMBEDDING_URL == "https://emb.example/v1/embeddings/multimodal"
+
+        monkeypatch.setenv("EMBEDDING_URL", "https://x.test/full/endpoint")
+        _reload()
+        assert config.settings.EMBEDDING_URL == "https://x.test/full/endpoint"
+    finally:
+        monkeypatch.undo()
+        _reload()

@@ -353,3 +353,23 @@
 - **修复**：截断改为 `items[-page_size:]`（保留最新页，丢弃头部探测行）。
 - **验证**：`test_history_pagination`（5 条 limit=3：第一页=最新 3 条+has_more，游标翻页=剩余 2 条+无更早，两页拼接与全量一致）与 `test_history_default_page_size`（205 条默认页=200 条+has_more）通过；全量 pytest 见当日验证记录。
 - **预防**：**「多取 1 条判边界」的分页模式，截断方向必须对着探测行的位置**（探测行在头则留尾、在尾则留头）——这类 off-by-one 光看代码难以察觉，分页接口上线前必须有「两页拼接=全量」的等价性测试。
+
+## BUG-027 热量识别 500：EMBEDDING_BASE_URL 填成完整端点路径被二次拼接 + vision 模型在标准 v3 不挂 /embeddings
+
+- **日期**：2026-08-24
+- **环境**：本机 dev（embedding 配置问题；凡用标准 v3 网关 + doubao-embedding-vision 的部署同受影响）
+- **现象**：热量识别 500，日志 `POST https://ark.cn-beijing.volces.com/api/v3/embeddings/multimodal/embeddings "500"`（路径里 `multimodal/embeddings` 明显重复）。前一天另有同路由 400：`InvalidSubscription`（plan 网关套餐过期）。
+- **根因**（两层叠加）：① 从 plan 网关（过期 400）切标准 v3 时，把 `EMBEDDING_BASE_URL` 填成了完整多模态端点 `…/api/v3/embeddings/multimodal`，而 `embedding.py` 约定 base 只到 `/api/v3`、由代码拼 `/embeddings`（文本）和 `/embeddings/multimodal`（图片）——文本调用被拼成 `…/multimodal/embeddings`，方舟返回 500。② 即便 base 改对，`doubao-embedding-vision-251215` 在标准 v3 网关**不挂 `/embeddings`**（400 `model does not support this api`）——plan 网关当年是把文本请求内部代转到 multimodal 的，直连接口没有这层代转。实测 multimodal 端点接受 `[{"type":"text",...}]` 文本输入且支持 `dimensions`，但无批量语义（多段 input 融合成单个向量）。
+- **修复**：`.env` 的 `EMBEDDING_BASE_URL` 改回 `https://ark.cn-beijing.volces.com/api/v3`；`embedding.py` 新增 `_vision_model()` 判定——vision 类模型的 `embed()` 走 `_embed_text_mm`（multimodal 端点 + text 段输入 + 单对象响应），`embed_batch()` 退化为逐条调（灌库变慢但正确）；非 vision 模型维持原 OpenAI 兼容路径。
+- **验证**：真实调用 `ai.embed_text`/`ai.embed_texts` 均 200、维度 1024 与库内存量向量一致（同一 doubao-embedding-vision 模型，向量空间不变，无需重灌库）；`test_multimodal.py` 新增 vision 分支 payload 形状 + 批量逐条语义用例。pytest 280/280。
+- **预防**：**`EMBEDDING_BASE_URL` 是「网关前缀」不是「端点全路径」，改配置时对照代码里的拼接后缀**；换 embedding 网关/模型时必须实测「文本 /embeddings、图片 /embeddings/multimodal、批量 input 数组」三个面——同一模型在不同网关（plan vs 标准 v3）挂载的端点面可能不同。
+
+## BUG-028 热量识别 404：dashscope 路径与模型名双重错误，催生 embedding「完整 URL 不拼接」重构
+
+- **日期**：2026-08-24
+- **环境**：本机 dev（配置问题 + 配置结构缺陷）
+- **现象**：BUG-027 修完后用户把 embedding 切到 dashscope，识别 500，日志 `POST https://dashscope.aliyuncs.com/api/v1/embeddings "404"`。
+- **根因**（两层）：① 路径错——dashscope 的 OpenAI 兼容 embedding 在 `/compatible-mode/v1/embeddings`，`/api/v1/embeddings` 不存在（原生路径是 `/api/v1/services/embeddings/...`，格式也不是 OpenAI 兼容）；② 模型名错——`qwen3-vl-embedding` 在百炼兼容模式不存在（实测 404 `model_not_supported`），可用的是 `text-embedding-v4` 等。深层原因：`EMBEDDING_BASE_URL` + 代码拼接后缀的模式要求配置者记住「前缀约定」，各家网关路径风格不一（火山 plan、火山 v3、dashscope 兼容模式全不同），每次换厂商都踩一遍。
+- **修复**：配置改为**完整端点 URL、代码零拼接**——新增 `EMBEDDING_URL`（config.py，文本图片共用一个端点：多模态模型本身单端点，纯文本模型没有图片能力），`embedding.py` 全部直接引用；留空时仍从旧 `EMBEDDING_BASE_URL` 推导惯例路径（兼容老配置）。payload/响应格式由模型名判定（含 `vision` = 多模态格式：段数组输入、单对象响应、无批量；否则 OpenAI 兼容格式）。`.env.example`/README 同步改写，附阿里百炼与火山 vision 两组完整 URL 示例。（当日曾短暂支持 dashscope 原生格式 `qwen3-vl-embedding` 并拆 TEXT/IMAGE 两个 URL 变量，决定沿用火山 vision 模型后均已回退/合并。）
+- **验证**：`test_config.py` 新增 `test_embedding_full_url_config`（完整 URL 优先 + BASE_URL 推导兜底）；`test_multimodal.py` 两个 payload 形状用例改为显式配 URL 断言。pytest 281/281。dashscope 侧实测 `text-embedding-v4` 走 `/compatible-mode/v1/embeddings` 返回 200、1024 维。
+- **预防**：**面向用户填写的 URL 配置一律收「完整端点」，代码不做路径拼接**——拼接约定是隐式知识，换个网关就出错；选型 embedding 厂商时先实测三件事：模型名在目标网关存在、文本/图片端点各是什么路径、向量空间与存量库是否兼容（换模型/厂商必须跑 `scripts/reembed.py` 回填，且跨厂商后 vision 图文同空间能力未必有等价物）。

@@ -71,8 +71,21 @@ def _fake_response(vec: list[float]):
 
 # ---------- 向量端点 payload 形状 ----------
 
+def _fake_response_obj(vec: list[float]):
+    class Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"data": {"embedding": vec}}
+
+    return Resp()
+
+
 def test_embed_payload_shape(monkeypatch) -> None:
-    """纯文本向量：OpenAI 兼容 /embeddings + input 为文本 + dimensions 显式指定。"""
+    """纯文本向量：OpenAI 兼容格式，URL 取配置完整端点 EMBEDDING_URL（代码不拼接）。"""
+    monkeypatch.setattr(settings, "EMBEDDING_MODEL", "text-embedding-test")  # 非 vision 走 OpenAI 格式
+    monkeypatch.setattr(settings, "EMBEDDING_URL", "https://emb.test/v1/embeddings")
     captured: dict = {}
     monkeypatch.setattr(
         embedding.httpx, "post",
@@ -80,11 +93,39 @@ def test_embed_payload_shape(monkeypatch) -> None:
         or _fake_response([0.1, 0.2, 0.3]),
     )
     vec = embedding.embed("海边看日出")
-    assert captured["url"].endswith("/embeddings")
+    assert captured["url"] == "https://emb.test/v1/embeddings"
     assert captured["payload"]["input"] == "海边看日出"
     assert captured["payload"]["dimensions"] == settings.EMBEDDING_DIM
     assert captured["payload"]["model"] == settings.EMBEDDING_MODEL
     assert len(vec) == 3
+
+
+def test_embed_payload_shape_vision_model(monkeypatch) -> None:
+    """vision 类 embedding 模型（标准网关不挂纯文本端点）：文本也走多模态端点（配置的完整 URL），
+    input 为 [{"type":"text",...}]，响应 data 是单对象。"""
+    monkeypatch.setattr(settings, "EMBEDDING_MODEL", "doubao-embedding-vision-test")
+    monkeypatch.setattr(settings, "EMBEDDING_URL", "https://emb.test/v3/embeddings/multimodal")
+    captured: dict = {}
+    monkeypatch.setattr(
+        embedding.httpx, "post",
+        lambda url, headers=None, json=None, timeout=None: captured.update(url=url, payload=json)
+        or _fake_response_obj([0.1, 0.2, 0.3]),
+    )
+    vec = embedding.embed("番茄炒蛋")
+    assert captured["url"] == "https://emb.test/v3/embeddings/multimodal"
+    assert captured["payload"]["input"] == [{"type": "text", "text": "番茄炒蛋"}]
+    assert captured["payload"]["dimensions"] == settings.EMBEDDING_DIM
+    assert len(vec) == 3
+
+    # 批量：multimodal 无批量语义，逐条调（两条 → 两次请求）
+    calls: list = []
+    monkeypatch.setattr(
+        embedding.httpx, "post",
+        lambda url, headers=None, json=None, timeout=None: calls.append(json["input"][0]["text"])
+        or _fake_response_obj([0.1]),
+    )
+    out = embedding.embed_batch(["a", "b"])
+    assert calls == ["a", "b"] and len(out) == 2
 
 
 def test_vision_caption_payload_shape(monkeypatch) -> None:

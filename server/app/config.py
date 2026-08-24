@@ -19,11 +19,20 @@ class Settings:
     LLM_BASE_URL: str = os.getenv("LLM_BASE_URL", "")
     LLM_MODEL: str = os.getenv("LLM_MODEL", "")
 
-    # Embedding（OpenAI 兼容 /embeddings，纯文本向量）
-    # KEY/BASE_URL 留空时回退 LLM 组：同厂商只需配 LLM_API_KEY
+    # Embedding（向量）：URL 直接配「完整端点路径」，代码不做任何拼接；文本与图片共用一个端点
+    # （支持图片向量的多模态模型本身就是单端点，纯文本模型没有图片能力）
+    # KEY 留空回退 LLM 组：同厂商只需配 LLM_API_KEY
     EMBEDDING_API_KEY: str = os.getenv("EMBEDDING_API_KEY", "") or LLM_API_KEY
-    EMBEDDING_BASE_URL: str = os.getenv("EMBEDDING_BASE_URL", "") or LLM_BASE_URL
+    # 模型名决定 payload/响应格式：含 vision = 多模态格式（input 段数组、响应 data 单对象、无批量），
+    # 否则 OpenAI 兼容格式（input 纯文本/数组、响应 data 数组）
     EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "")
+    # 完整端点 URL；留空时按旧变量 EMBEDDING_BASE_URL（再空回退 LLM_BASE_URL）推导惯例路径
+    # 兼容老配置（vision 多模态模型推导 /embeddings/multimodal，其余 /embeddings）
+    EMBEDDING_BASE_URL: str = os.getenv("EMBEDDING_BASE_URL", "") or LLM_BASE_URL
+    EMBEDDING_URL: str = os.getenv("EMBEDDING_URL", "") or (
+        f"{EMBEDDING_BASE_URL.rstrip('/')}/embeddings/multimodal"
+        if "vision" in EMBEDDING_MODEL else f"{EMBEDDING_BASE_URL.rstrip('/')}/embeddings"
+    )
     # 向量维度：调用时显式传，保证全库同维度（换模型/改维度后必须跑 scripts/reembed.py 回填）
     EMBEDDING_DIM: int = int(os.getenv("EMBEDDING_DIM", "1024"))
 

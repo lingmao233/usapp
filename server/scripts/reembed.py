@@ -1,10 +1,12 @@
-"""一次性回填：全部碎片/愿望/知识条目按多模态口径重 embed（含既有图片碎片读展示图文件 embed）。
+"""一次性回填：换 embedding 模型/维度后按当前口径重 embed 全库（碎片/愿望/知识条目/食物成分表）。
 
 跑法：cd server && .venv-mac/bin/python scripts/reembed.py
 口径与各写入路径严格一致：
 - 碎片 = pipeline.fragment_embedding（图文双有取均值+归一化，纯图片用图片向量）
 - 愿望 = add_wish / 碎片管线同口径的纯文本向量（content 为空用占位词）
 - 知识条目 = 标题 + 来源碎片原文 + 正文前 500 字（pipeline 归档公式）
+- 食物成分表 = 食物名纯文本向量（与 _seed_food_nutrition / nutrition._vector_match 同口径；
+  启动灌库只在表为空时跑，换模型后已有库必须靠这里回填，否则跨空间向量乱匹配）
 要求真实 EMBEDDING 配置（未配置会在首行 embed 抛 AINotConfiguredError）。
 """
 import os
@@ -57,6 +59,18 @@ def main() -> None:
         )
     conn.commit()
     print(f"知识条目回填完成：共 {len(rows)} 条")
+
+    rows = conn.execute("SELECT id, name FROM food_nutrition").fetchall()
+    for i, r in enumerate(rows, 1):
+        vec = ai.embed_text(r["name"])
+        conn.execute(
+            "UPDATE food_nutrition SET embedding=? WHERE id=?", (encode_embedding(vec), r["id"])
+        )
+        if i % 50 == 0:
+            conn.commit()
+            print(f"食物成分表已回填 {i}/{len(rows)} 条…")
+    conn.commit()
+    print(f"食物成分表回填完成：共 {len(rows)} 条")
 
 
 if __name__ == "__main__":

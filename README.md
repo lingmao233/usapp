@@ -73,7 +73,7 @@ cp .env.example server/.env
 |------|------|
 | `LLM_API_KEY` | 文本 LLM（OpenAI 兼容 chat）API key，用于分类/摘要/周报/画像/方案 |
 | `LLM_BASE_URL` / `LLM_MODEL` | OpenAI 兼容端点与模型名（如阿里百炼 `https://dashscope.aliyuncs.com/compatible-mode/v1` + `qwen-plus`） |
-| `EMBEDDING_MODEL` | 文本向量模型名（如 `text-embedding-v4`）；`EMBEDDING_API_KEY`/`EMBEDDING_BASE_URL` 留空回退 LLM 组 |
+| `EMBEDDING_URL` / `EMBEDDING_MODEL` | 向量端点**完整 URL**（代码不拼接，直接抄控制台地址；文本与图片共用一个端点）与模型名（如 `doubao-embedding-vision-251215`、`text-embedding-v4`）；`EMBEDDING_API_KEY` 留空回退 LLM 组 |
 | `VISION_MODEL` | 可选；视觉模型名（如 `qwen-vl-max-latest`），用于图片 caption/账单/食物识别，留空自动跳过 |
 | `REDIS_URL` | 可选；连不上时降级为进程内字典并打 warning |
 
