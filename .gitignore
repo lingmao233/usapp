@@ -49,8 +49,8 @@ weapp/.swc/
 # 其他工具会话产物
 .workbuddy
 .kimi-code
-.zcode
-docs
+.zcode/
+docs/
 
 
 server/data/device_secret
