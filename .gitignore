@@ -47,10 +47,11 @@ node_modules.bak/
 weapp/.swc/
 
 # 其他工具会话产物
-.workbuddy/
+.workbuddy
 git教程.md
-.kimi-code/
-.zcode/
+.kimi-code
+.zcode
+docs
 
 
 server/data/device_secret
